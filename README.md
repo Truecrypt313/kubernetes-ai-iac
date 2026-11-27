@@ -260,17 +260,24 @@ sichert zusätzlich den internen Hop von `cloudflared` zu Traefik ab.
    funktionsfähig. Auf einem neuen Cluster zuerst das Chart installieren und
    auf CRDs und Webhook warten. Der Kubernetes-Provider braucht die CRDs
    bereits beim Planen von `Issuer` und `Certificate`.
-2. Im Namespace `web` ergänzt Terraform das Secret `cloudflare-dns01-token`,
+2. Im Namespace `web` verwaltet Terraform das Secret `cloudflare-dns01-token`,
    den [Let’s-Encrypt-Staging-Issuer](https://letsencrypt.org/docs/staging-environment/)
    `letsencrypt-staging` und das Certificate `lab-motion1-de-staging`.
    Der Issuer referenziert das Secret über `apiTokenSecretRef` für
    [DNS-01](https://cert-manager.io/docs/configuration/acme/dns01/cloudflare/).
-   Cert-manager schreibt das Staging-Zertifikat in `lab-motion1-de-staging-tls`.
-   Dieses Secret dient nur zur Ausstellungsprobe. Cloudflared nutzt weiterhin
-   die HTTP-Route zu Traefik.
-3. Nach dem Staging-Test das Produktionszertifikat ausstellen und den
-   HTTPS-Entrypoint von Traefik parallel zur bisherigen HTTP-Route aktivieren.
-   Das Zertifikat lokal mit
+   Nach dem manuellen Apply (`3 added, 0 changed, 0 destroyed`) waren Issuer
+   und Certificate `Ready`, und der ACME-Order war `valid`. DNS-01 hat damit
+   funktioniert. Cert-manager speichert das Staging-Zertifikat im Secret
+   `lab-motion1-de-staging-tls` für die Ausstellungsprobe.
+3. Für Production plant Terraform den Issuer `letsencrypt-production` und
+   das Certificate `lab-motion1-de-production`. Beide Umgebungen nutzen das
+   vorhandene DNS-01-Secret und dieselbe ACME-Kontaktadresse. Cert-manager
+   verwendet für Production die separaten Secrets
+   `letsencrypt-production-account` und `lab-motion1-de-production-tls`.
+   Bis zur späteren Aktivierung des Zertifikats läuft der Origin-Traffic
+   weiterhin per HTTP zu Traefik.
+4. Nach erfolgreicher Production-Ausstellung den HTTPS-Entrypoint von Traefik
+   parallel zur bisherigen HTTP-Route aktivieren. Das Zertifikat lokal mit
    Port-Forwarding und SNI `lab.motion1.de` prüfen. Erst danach den Tunnel
    auf `https://traefik.web.svc.cluster.local:443` umstellen.
    [`originServerName`](https://developers.cloudflare.com/tunnel/troubleshooting/https-origins/)
@@ -279,7 +286,7 @@ sichert zusätzlich den internen Hop von `cloudflared` zu Traefik ab.
    Zum Abschluss HTTPS öffentlich erneut testen. Die HTTP-Route bleibt bis
    dahin als Rückfallweg verfügbar.
 
-Für den authentifizierten Staging-Plan im vorbereiteten Terminal zusätzlich
+Für den authentifizierten App-Plan im vorbereiteten Terminal zusätzlich
 zu den [Cloudflare-Variablen für den Tunnel](#cloudflare-tunnel) setzen:
 
 | Variable | Zweck |
@@ -293,13 +300,13 @@ Plänen heraus. Für den Plan weiterhin einen geschützten Speicherort und
 Modus `0600` verwenden, da andere Werte darin sensibel sein können.
 Beim Drehen des DNS-01-Tokens `data_wo_revision` erhöhen.
 
-Der App-Plan soll genau Secret, Issuer und Certificate hinzufügen. Nach
-freigegebenem Apply prüfen, dass beide ACME-Ressourcen `Ready` sind:
+Der Production-Plan soll nur den neuen Issuer und das Certificate hinzufügen.
+Nach freigegebenem Apply prüfen, dass beide ACME-Ressourcen `Ready` sind:
 
 ```sh
 kubectl_lab="${XDG_CACHE_HOME:-$HOME/.cache}/kubernetes-ai-iac/kubectl/v1.35.8/kubectl"
-"$kubectl_lab" --kubeconfig=cluster/kubeconfig -n web wait --for=condition=Ready issuer/letsencrypt-staging --timeout=120s
-"$kubectl_lab" --kubeconfig=cluster/kubeconfig -n web wait --for=condition=Ready certificate/lab-motion1-de-staging --timeout=300s
+"$kubectl_lab" --kubeconfig=cluster/kubeconfig -n web wait --for=condition=Ready issuer/letsencrypt-production --timeout=120s
+"$kubectl_lab" --kubeconfig=cluster/kubeconfig -n web wait --for=condition=Ready certificate/lab-motion1-de-production --timeout=300s
 ```
 
 ## Lokales Monitoring
