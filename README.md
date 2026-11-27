@@ -33,7 +33,7 @@ Das Projekt dient als DevOps-Portfolio und demonstriert KI-gestützte Infrastruc
 - [ ] Tunnel und DNS über Terraform konfigurieren
 - [ ] HTTPS und automatische Zertifikatsverwaltung einrichten
 - [x] Prometheus und Grafana bereitstellen
-- [ ] Kubernetes MCP in Codex integrieren
+- [x] Kubernetes MCP in Codex integrieren
 - [ ] GitHub Actions für Codevalidierung einrichten
 - [ ] Vollständigen Aufbau und Abbau testen
 
@@ -185,11 +185,59 @@ IP und funktioniert unabhängig vom öffentlichen DNS. Port-Forwarding mit
 ## Cloudflare DNS
 
 Am 27.11.2026 wurden bei STRATO für `motion1.de` die Cloudflare-Nameserver
-eingetragen. Bei der erneuten Prüfung nach dem Monitoring-Apply verwiesen die
-`.de`-Zone sowie die öffentlichen Resolver `1.1.1.1` und `8.8.8.8` weiterhin
-auf `docks06.rzone.de` und `shades07.rzone.de`. In der `.de`-Zone wurde kein
-DS-Eintrag zurückgegeben. Die öffentliche Delegation an Cloudflare und die
-Domainaktivierung stehen aus. Das lokale Monitoring läuft unabhängig davon.
+eingetragen. Die erneute Prüfung nach dem MCP-Apply bestätigte die öffentliche
+Delegation an `major.ns.cloudflare.com` und `maleah.ns.cloudflare.com` bei der
+`.de`-Zone und den öffentlichen Resolvern `1.1.1.1` und `8.8.8.8`. Beide
+Cloudflare-Nameserver antworteten autoritativ für die Zone. Der Status `Active`
+im Cloudflare-Dashboard ist noch zu bestätigen.
+
+## Cloudflare Tunnel
+
+`apps/main.tf` beschreibt einen von Cloudflare verwalteten Tunnel mit dem
+[Cloudflare-Provider 5.29.0](https://github.com/cloudflare/terraform-provider-cloudflare/releases/tag/v5.29.0).
+Seine einzige öffentliche Route ist `lab.motion1.de`. Sie führt über `cloudflared`
+zu `http://traefik.web.svc.cluster.local:80` und über den vorhandenen Ingress
+zu Nginx. Andere Hostnamen erhalten HTTP 404. Terraform legt den proxied CNAME
+erst an, wenn der Connector bereit ist.
+
+Im Namespace `web` läuft dafür eine Replika von `cloudflared` 2026.11.2 mit
+festem Image-Digest. Sie liest den Tunnel-Token aus einem schreibgeschützt
+eingebundenen Kubernetes-Secret und baut ausgehende Verbindungen zu Cloudflare
+auf. Der Connector benötigt ausgehenden Zugriff auf Port 7844 (UDP für QUIC
+oder TCP für HTTP/2). Der interne Weg zu Traefik nutzt zunächst HTTP.
+cert-manager und Let's Encrypt folgen in einem eigenen Schritt.
+
+Für den authentifizierten Plan im vorbereiteten Terminal werden diese
+Umgebungsvariablen benötigt:
+
+| Variable | Zweck |
+|---|---|
+| `CLOUDFLARE_API_TOKEN` | API-Token mit `Cloudflare Tunnel Write` im Zielkonto und `DNS Write` für `motion1.de` |
+| `TF_VAR_cloudflare_account_id` | Account-ID des Zielkontos |
+| `TF_VAR_cloudflare_zone_id` | Zone-ID von `motion1.de` im selben Konto |
+
+Die Werte lokal in der Umgebung setzen, etwa über einen Passwortmanager.
+Vor dem Plan im Cloudflare-Dashboard prüfen, dass die Zone `Active` ist und
+`lab.motion1.de` noch keinen DNS-Eintrag hat. Vom Projektverzeichnis aus:
+
+```sh
+set +x
+umask 077
+if test -f apps/terraform.tfstate; then chmod 600 apps/terraform.tfstate; fi
+plan_dir=$(mktemp -d "${TMPDIR:-/tmp}/kubernetes-ai-iac-plan.XXXXXXXX")
+TF_LOG=OFF terraform -chdir=apps plan -input=false -out="$plan_dir/cloudflare.tfplan"
+```
+
+Der API-Token wird direkt aus der Umgebung des Providers gelesen. Der separate
+Tunnel-Token kann über die Cloudflare-Datenquelle im State und in späteren
+Plänen stehen. Das Secret nutzt `data_wo`, damit die Kubernetes-Ressource den
+Token dort nicht zusätzlich ablegt. State, Backups und Pläne sind lokale
+Geheimnisdateien und gehören nicht in Git oder in geteilte Ausgaben. State und
+Plan im Modus `0600` halten, Pläne nach Gebrauch löschen und für die Prüfung
+die normale Terraform-Ausgabe ohne Debug-Logs oder JSON-Export verwenden.
+
+Initialisierung, Formatierung und Validierung sind abgeschlossen. Der
+authentifizierte Plan und die Bereitstellung stehen aus.
 
 ## Lokales Monitoring
 
@@ -247,16 +295,24 @@ aus `.codex/config.toml` lokal mit `npx` über stdio. Die Server-Konfiguration
 `.codex/kubernetes-mcp.toml` bietet vier lesende Werkzeuge an und sperrt
 Secrets. Ein geerbter Terraform-MCP-Server ist für dieses Projekt deaktiviert.
 
-Terraform plant den ServiceAccount `web/codex-mcp`, eine gemeinsame ClusterRole
+Terraform verwaltet den ServiceAccount `web/codex-mcp`, eine gemeinsame ClusterRole
 und je ein RoleBinding in `web` und `monitoring`. Die Bindings begrenzen
 `get` und `list` für Pods, Services, Events, Deployments, DaemonSets,
 StatefulSets und Ingresses auf diese zwei Namespaces. Secrets, Pod-Exec,
 Pod-Logs und Änderungen an Workloads sind nicht erlaubt.
 
-Nach dem freigegebenen Apply vom Projektverzeichnis aus eine eigene kubeconfig
-mit kurzlebigem Token erstellen. Dafür sind `jq`, `npx` und das kubectl aus
-dem Projektcache nötig. Die Admin-kubeconfig wird nur für diesen manuellen
-Schritt verwendet. Der MCP-Prozess erhält ausschließlich `cluster/kubeconfig.mcp`.
+Am 27.11.2026 erstellte der geprüfte Plan genau diese vier RBAC-Ressourcen.
+`kubectl auth can-i` bestätigte mit dem ServiceAccount 28 erlaubte und 55
+verbotene Abfragen. Echte MCP-Aufrufe lasen Pods, Deployments und Services in
+`web` und `monitoring`. Secrets und die übrigen fünf Namespaces wurden
+abgewiesen. Eine generische Pod-Liste ohne Namespace verwendet `web` aus dem
+kubeconfig-Kontext. Der Codex-App-Server konnte die Pods in `web` über MCP lesen.
+Die Folgepläne für `apps/` und `cluster/` meldeten keine Änderungen.
+
+Eine separate kubeconfig mit kurzlebigem Token liegt lokal vor. Bei Ablauf
+vom Projektverzeichnis aus mit `jq` und dem kubectl aus dem Projektcache
+erneuern. Die Admin-kubeconfig wird nur für diesen manuellen Schritt verwendet.
+Der MCP-Prozess erhält ausschließlich `cluster/kubeconfig.mcp`.
 
 ```sh
 (
@@ -282,8 +338,14 @@ Schritt verwendet. Der MCP-Prozess erhält ausschließlich `cluster/kubeconfig.m
 )
 ```
 
-Die Datei hat Modus `0600` und wird von Git ignoriert. Bei Ablauf den Befehl
-erneut ausführen. In VS Code das Projektverzeichnis als vertrauenswürdigen
-Workspace öffnen und die Codex-Erweiterung neu starten. Für Tests in Codex
-beispielsweise nach den Pods im Namespace `web` fragen. Die Abfrage nach Pods
-in `kube-system` oder nach Secrets muss abgewiesen werden.
+Die Datei hat Modus `0600` und wird von Git ignoriert. Das Token gilt eine
+Stunde. In VS Code das Projektverzeichnis als vertrauenswürdigen Workspace
+öffnen und die Codex-Erweiterung neu starten. `codex mcp list` zeigt im
+Projektverzeichnis den lokalen Server `kubernetes` als aktiviert an.
+
+Beispielabfragen im Codex-Chat:
+
+- „Liste über Kubernetes MCP die Pods, Deployments und Services in `web` und
+  `monitoring`. Nutze keine Shell.“
+- „Prüfe ausschließlich über Kubernetes MCP, ob eine Pod-Liste in `kube-system`
+  und eine Secret-Liste in `monitoring` abgewiesen werden. Gib nur das Ergebnis aus.“
