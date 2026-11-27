@@ -32,8 +32,8 @@ Das Projekt dient als DevOps-Portfolio und demonstriert KI-gestützte Infrastruc
 - [ ] Cloudflare mit motion1.de verbinden
 - [ ] Tunnel und DNS über Terraform konfigurieren
 - [ ] HTTPS und automatische Zertifikatsverwaltung einrichten
-- [ ] Prometheus und Grafana bereitstellen
-- [ ] Terraform MCP und Kubernetes MCP integrieren
+- [x] Prometheus und Grafana bereitstellen
+- [ ] Kubernetes MCP in Codex integrieren
 - [ ] GitHub Actions für Codevalidierung einrichten
 - [ ] Vollständigen Aufbau und Abbau testen
 
@@ -47,7 +47,7 @@ Der Cluster und seine Anwendungen werden durch getrennte Terraform-Konfiguration
 
 Natürliche Sprache → Terraform-Code → Git Pull Request → Validierung → Terraform Plan → Manuelle Freigabe → Terraform Apply
 
-Für die KI-Anbindung werden bestehende Terraform- und Kubernetes-MCP-Server verwendet.
+Codex verwendet einen lokalen Kubernetes-MCP-Server für lesende Cluster-Abfragen.
 
 ## Projektregeln
 
@@ -185,13 +185,15 @@ IP und funktioniert unabhängig vom öffentlichen DNS. Port-Forwarding mit
 ## Cloudflare DNS
 
 Am 27.11.2026 wurden bei STRATO für `motion1.de` die Cloudflare-Nameserver
-eingetragen. Bei der Prüfung lieferten die `.de`-Zone und öffentliche Resolver
-noch die bisherigen STRATO-Nameserver. Die Cloudflare-Aktivierung steht aus.
-Das lokale Monitoring ist davon unabhängig und wird vorgezogen.
+eingetragen. Bei der erneuten Prüfung nach dem Monitoring-Apply verwiesen die
+`.de`-Zone sowie die öffentlichen Resolver `1.1.1.1` und `8.8.8.8` weiterhin
+auf `docks06.rzone.de` und `shades07.rzone.de`. In der `.de`-Zone wurde kein
+DS-Eintrag zurückgegeben. Die öffentliche Delegation an Cloudflare und die
+Domainaktivierung stehen aus. Das lokale Monitoring läuft unabhängig davon.
 
 ## Lokales Monitoring
 
-`apps/main.tf` plant den Namespace `monitoring` und das Helm-Release
+`apps/main.tf` verwaltet den Namespace `monitoring` und das Helm-Release
 [`kube-prometheus-stack` 94.1.0](https://github.com/prometheus-community/helm-charts/releases/tag/kube-prometheus-stack-94.1.0).
 Das Chart verlangt Kubernetes ab 1.25 und wurde mit Helm 3.20.2 für Kubernetes
 1.35.8 gerendert. Es bündelt Prometheus, Prometheus Operator, Grafana, Node
@@ -201,12 +203,23 @@ deaktiviert.
 Prometheus hält Metriken 24 Stunden vor. Prometheus und Grafana verwenden
 temporären Speicher. Auf diesem kind-Cluster bleiben die lokalen Metrik-Endpunkte
 von etcd, Controller Manager, Scheduler und kube-proxy unangetastet und werden
-nicht abgefragt. Der App-Plan sieht zwei neue Ressourcen vor und keine
-Änderungen an den bestehenden Ressourcen.
+nicht abgefragt.
 
-Nach dem freigegebenen Apply sind Prometheus und Grafana per Port-Forwarding
-erreichbar. Vom Projektverzeichnis aus die Variable in jedem Terminal setzen
-und jeweils einen der beiden `port-forward`-Befehle ausführen:
+Am 27.11.2026 erstellte der geprüfte Terraform-Plan zwei Ressourcen. Alle fünf
+Monitoring-Pods waren bereit und liefen ohne Neustarts. Alle sechs Services
+im Namespace `monitoring` und die beiden Scrape-Services in `kube-system`
+hatten bereite Endpunkte. Prometheus meldete 12 von 12 aktiven Zielen als `up`
+und keine Scrape-Fehler. Prometheus und Grafana antworteten über Port-Forwarding
+mit HTTP 200. Grafana konnte die 12 `up`-Zeitreihen aus Prometheus abrufen.
+Nginx antwortete über Traefik weiterhin mit HTTP 200 für `lab.motion1.de`.
+Die Folgepläne für `apps/` und `cluster/` meldeten keine Änderungen.
+
+Grafanas Readiness-Prüfung meldete beim Start drei abgelehnte Verbindungen.
+Danach war Grafana bereit. Dem Node Exporter fehlen udev-Zusatzdaten im
+kind-Knoten. Der `diskstats`-Collector lieferte trotzdem Metriken.
+
+Für den lokalen Zugriff vom Projektverzeichnis aus die Variable in jedem
+Terminal setzen und jeweils einen der beiden `port-forward`-Befehle ausführen:
 
 ```sh
 kubectl_lab="${XDG_CACHE_HOME:-$HOME/.cache}/kubernetes-ai-iac/kubectl/v1.35.8/kubectl"
@@ -226,3 +239,51 @@ printf '\n'
 
 Helm installiert die Monitoring-CRDs beim ersten Apply. Beim Entfernen des
 Releases bleiben die CRDs bis zum vollständigen Cluster-Abbau bestehen.
+
+## Kubernetes MCP in VS Code
+
+Codex startet [`containers/kubernetes-mcp-server` 0.1.3](https://github.com/containers/kubernetes-mcp-server/releases/tag/v0.1.3)
+aus `.codex/config.toml` lokal mit `npx` über stdio. Die Server-Konfiguration
+`.codex/kubernetes-mcp.toml` bietet vier lesende Werkzeuge an und sperrt
+Secrets. Ein geerbter Terraform-MCP-Server ist für dieses Projekt deaktiviert.
+
+Terraform plant den ServiceAccount `web/codex-mcp`, eine gemeinsame ClusterRole
+und je ein RoleBinding in `web` und `monitoring`. Die Bindings begrenzen
+`get` und `list` für Pods, Services, Events, Deployments, DaemonSets,
+StatefulSets und Ingresses auf diese zwei Namespaces. Secrets, Pod-Exec,
+Pod-Logs und Änderungen an Workloads sind nicht erlaubt.
+
+Nach dem freigegebenen Apply vom Projektverzeichnis aus eine eigene kubeconfig
+mit kurzlebigem Token erstellen. Dafür sind `jq`, `npx` und das kubectl aus
+dem Projektcache nötig. Die Admin-kubeconfig wird nur für diesen manuellen
+Schritt verwendet. Der MCP-Prozess erhält ausschließlich `cluster/kubeconfig.mcp`.
+
+```sh
+(
+  set -euo pipefail
+  umask 077
+  kubectl_lab="${XDG_CACHE_HOME:-$HOME/.cache}/kubernetes-ai-iac/kubectl/v1.35.8/kubectl"
+  lab_admin() {
+    "$kubectl_lab" --kubeconfig=cluster/kubeconfig --context=kind-kubernetes-ai-iac "$@"
+  }
+  connection=$(lab_admin config view --minify --flatten -o 'jsonpath-as-json={.clusters[0].cluster}' |
+    jq -ce '.[0] | {server, "certificate-authority-data"} | select(.server and ."certificate-authority-data")')
+  mcp_tmp=$(mktemp cluster/kubeconfig.mcp.XXXXXX)
+  trap 'rm -- "$mcp_tmp"' EXIT
+  lab_admin -n web create token codex-mcp --duration=1h |
+    jq -Rce --argjson connection "$connection" 'select(length > 0) | {
+      apiVersion: "v1", kind: "Config", "current-context": "codex-mcp",
+      clusters: [{name: "kind-lab", cluster: $connection}],
+      contexts: [{name: "codex-mcp", context: {cluster: "kind-lab", user: "codex-mcp", namespace: "web"}}],
+      users: [{name: "codex-mcp", user: {token: .}}]
+    }' > "$mcp_tmp"
+  mv -- "$mcp_tmp" cluster/kubeconfig.mcp
+  trap - EXIT
+)
+```
+
+Die Datei hat Modus `0600` und wird von Git ignoriert. Bei Ablauf den Befehl
+erneut ausführen. In VS Code das Projektverzeichnis als vertrauenswürdigen
+Workspace öffnen und die Codex-Erweiterung neu starten. Für Tests in Codex
+beispielsweise nach den Pods im Namespace `web` fragen. Die Abfrage nach Pods
+in `kube-system` oder nach Secrets muss abgewiesen werden.

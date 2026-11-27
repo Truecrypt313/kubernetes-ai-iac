@@ -1,0 +1,9 @@
+[mcp_servers.kubernetes]
+command = "npx"
+args = ["--yes", "kubernetes-mcp-server@0.1.3", "--config", ".codex/kubernetes-mcp.toml"]
+cwd = "."
+startup_timeout_sec = 30
+
+[mcp_servers.terraform]
+url = "https://mcp.terraform.io/mcp"
+enabled = false
