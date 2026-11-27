@@ -26,7 +26,7 @@ Das Projekt dient als DevOps-Portfolio und demonstriert KI-gestützte Infrastruc
 
 - [x] Alte Infrastruktur vollständig entfernen
 - [x] Git-Projekt initialisieren
-- [ ] Kubernetes-Cluster mit Terraform bereitstellen
+- [x] Kubernetes-Cluster mit Terraform bereitstellen
 - [ ] Nginx-Webseite mit Deployment und Service bereitstellen
 - [ ] Traefik installieren
 - [ ] Cloudflare mit motion1.de verbinden
@@ -103,8 +103,8 @@ Kubernetes 1.35 ist als gemeinsame Basis für den späteren Helm-Provider 3.3.0
 Quellen: [Helm-Provider](https://github.com/hashicorp/terraform-provider-helm/releases/tag/v3.3.0),
 [Helm-Kompatibilität](https://helm.sh/docs/v3/topics/version_skew/),
 [cert-manager-Kompatibilität](https://cert-manager.io/docs/releases/).
-Vor einem späteren Cluster-Test wird kubectl 1.35.x oder 1.36.x benötigt;
-das installierte kubectl 1.37.3 liegt außerhalb der
+Für die Cluster-Prüfung wurde kubectl 1.35.8 aus dem separaten Projektcache
+verwendet. Das systemweit installierte kubectl 1.37.3 liegt außerhalb der
 [unterstützten Versionsabweichung](https://kubernetes.io/releases/version-skew-policy/).
 
 Vom Projektverzeichnis aus prüfen:
@@ -116,15 +116,64 @@ terraform -chdir=cluster validate
 terraform -chdir=cluster plan -input=false -detailed-exitcode
 ```
 
-Am 27.11.2026 waren Initialisierung, Formatierung, Validierung und Planung
-erfolgreich. Der Plan sieht eine neue Ressource vor, keine Änderungen und
-keine Löschungen. Exitcode 2 bei `plan -detailed-exitcode` bedeutet einen
-erfolgreichen Plan mit vorgesehenen Änderungen.
-Der Cluster wurde noch nicht bereitgestellt; der entsprechende Roadmap-Punkt
-bleibt offen. Laufzeit und vollständiger Abbau sind noch nicht getestet.
+Am 27.11.2026 waren Initialisierung, Formatierung und Validierung erfolgreich.
+Der gespeicherte Plan enthielt ausschließlich die Erstellung von `kind_cluster.lab`
+(Exitcode 2). `terraform apply` mit diesem Plan erstellte genau eine Ressource.
+Der Folgeplan meldete keine Änderungen (Exitcode 0).
 
-Bei einer späteren freigegebenen Bereitstellung entsteht `cluster/kubeconfig`.
-Diese Datei, lokale Terraform-Daten unter `.terraform/`, State-Dateien,
-gespeicherte Pläne und lokale Geheimnisse werden durch `.gitignore`
-ausgeschlossen. Der State kann private Cluster-Schlüssel enthalten und muss
-außerhalb von Git geschützt aufbewahrt und gesichert werden.
+Die Kubernetes-API meldete unter `/readyz` den Status `ok`. Client und Server
+meldeten Version 1.35.8. Der einzige Knoten war `Ready`, alle fünf Namespaces
+waren `Active`. Die acht Pods in `kube-system` und der Pod in
+`local-path-storage` liefen und waren bereit. Der vollständige Abbau und
+Neuaufbau bleibt ein eigener Roadmap-Schritt.
+
+`cluster/kubeconfig` und `cluster/terraform.tfstate` haben Modus `0600`
+(nur der Besitzer darf lesen und schreiben). Git ignoriert beide Dateien,
+die lokalen Terraform-Daten, gespeicherte Pläne und lokale Geheimnisse.
+Der State kann private Cluster-Schlüssel enthalten und muss außerhalb von
+Git geschützt aufbewahrt und gesichert werden.
+
+## Nginx und Traefik
+
+`apps/main.tf` verwendet die bestehende Cluster-kubeconfig und einen eigenen
+Terraform-State. Der Namespace `web` enthält zwei Nginx-Pods, ihren internen
+Service und Traefik. Der Ingress leitet `lab.motion1.de` über Traefik an den
+Nginx-Service weiter. Beide Services sind vom Typ `ClusterIP`.
+
+Die App-Konfiguration fixiert die Provider Kubernetes 3.5.0 und Helm 3.3.0,
+Nginx 1.30.8 sowie das [offizielle Traefik-Chart 43.0.0](https://github.com/traefik/traefik-helm-chart/releases/tag/v43.0.0)
+mit Traefik 3.8.0. Beide Images sind per Digest festgelegt. Das Chart verlangt
+Kubernetes ab 1.30. Der vorhandene Cluster mit 1.35.8 liegt außerdem im
+unterstützten Bereich des im Helm-Provider eingebetteten Helm 3.20.2.
+
+Vom Projektverzeichnis aus prüfen:
+
+```sh
+terraform -chdir=apps init -input=false -lockfile=readonly
+terraform -chdir=apps fmt -check
+terraform -chdir=apps validate
+terraform -chdir=apps plan -input=false -detailed-exitcode
+```
+
+Der Plan sieht fünf neue Terraform-Ressourcen vor. `helm template` mit
+Helm 3.20.2 bestätigt den internen Traefik-Service auf Port 80 und die
+IngressClass `traefik`. Der lokale Funktionstest folgt nach freigegebenem
+Apply. Im ersten Terminal auf die beiden Deployments warten und Traefik an
+den lokalen Port 8080 weiterleiten:
+
+```sh
+kubectl_lab="${XDG_CACHE_HOME:-$HOME/.cache}/kubernetes-ai-iac/kubectl/v1.35.8/kubectl"
+"$kubectl_lab" --kubeconfig=cluster/kubeconfig -n web rollout status deployment/nginx --timeout=120s
+"$kubectl_lab" --kubeconfig=cluster/kubeconfig -n web rollout status deployment/traefik --timeout=120s
+"$kubectl_lab" --kubeconfig=cluster/kubeconfig -n web port-forward --address=127.0.0.1 svc/traefik 8080:80
+```
+
+Im zweiten Terminal die Nginx-Startseite über den Ingress abrufen:
+
+```sh
+curl -fsS -H 'Host: lab.motion1.de' http://127.0.0.1:8080/ | grep -F 'Welcome to nginx!'
+```
+
+Der `Host`-Header wählt die Ingress-Regel aus. Der Aufruf verwendet die lokale
+IP und funktioniert unabhängig vom öffentlichen DNS. Port-Forwarding mit
+`Ctrl+C` beenden.
