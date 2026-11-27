@@ -34,39 +34,9 @@ A DevOps portfolio project that turns a local Kubernetes cluster into a public H
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    browser["Browser"] -->|"HTTPS"| cf["Cloudflare DNS + HTTPS edge"]
-
-    subgraph cluster["Local workstation · Docker / kind · one Kubernetes node"]
-        subgraph web["Namespace: web"]
-            connector["cloudflared"]
-            traefik["Traefik<br/>websecure :443"]
-            nginx["Nginx ClusterIP :80<br/>2 Nginx replicas"]
-            connector -->|"HTTPS :443<br/>Certificate validated"| traefik
-            traefik -->|"HTTP :80"| nginx
-        end
-        cm["Namespace: cert-manager<br/>Let's Encrypt via DNS-01"]
-        subgraph monitoring["Namespace: monitoring · private"]
-            direction LR
-            grafana["Grafana"] -->|"PromQL"| prometheus["Prometheus"]
-            prometheus -->|"Scrape"| exporters["Node Exporter<br/>kube-state-metrics"]
-        end
-    end
-
-    cf -->|"Encrypted tunnel<br/>Connector dials out"| connector
-    cm -.->|"Production TLS Secret in web"| traefik
-
-    classDef edge fill:#fff4e6,stroke:#d97706,color:#7c2d12
-    classDef workload fill:#eff6ff,stroke:#2563eb,color:#1e3a8a
-    classDef observe fill:#f0fdf4,stroke:#16a34a,color:#14532d
-    class cf edge
-    class connector,traefik,nginx,cm workload
-    class grafana,prometheus,exporters observe
-    style cluster fill:#f8fafc,stroke:#94a3b8,color:#334155
-    style web fill:#f0f7ff,stroke:#93c5fd,color:#1e3a8a
-    style monitoring fill:#f0fdf4,stroke:#86efac,color:#14532d
-```
+<a href="docs/images/architecture.png?raw=true">
+  <img src="docs/images/architecture.png" alt="Kubernetes lab architecture" width="100%">
+</a>
 
 Cloudflare terminates browser TLS. Inside the cluster, cloudflared connects to `https://traefik.web.svc.cluster.local:443` and validates the origin certificate against **`lab.motion1.de`** (`no_tls_verify = false`). Traefik forwards HTTP to Nginx. Internal HTTP ingress remains available as a deliberate rollback option; TLS failures do not trigger an automatic downgrade.
 
@@ -74,15 +44,9 @@ cert-manager uses Cloudflare DNS-01 validation with separate staging and product
 
 ## AI-assisted infrastructure workflow
 
-```mermaid
-flowchart LR
-    intent["Describe intent"] --> code["Codex + Terraform"]
-    mcp["Read-only Kubernetes MCP"] -.->|"Cluster context"| code
-    code --> pr["Feature branch + PR<br/>Validate + review plan"]
-    pr --> approval["Explicit human approval<br/>Merge and apply gates"]
-    approval --> apply["Manual apply"]
-    apply --> verify["Verify workloads<br/>and application behavior"]
-```
+<a href="docs/images/ai-workflow.png?raw=true">
+  <img src="docs/images/ai-workflow.png" alt="AI-assisted infrastructure workflow" width="100%">
+</a>
 
 Codex helps prepare changes and explain plans. The MCP server, [`containers/kubernetes-mcp-server`](https://github.com/containers/kubernetes-mcp-server), provides read-only cluster context. Merge and apply are separate approval steps; the current workflow is manual. GitHub Actions validation is still on the roadmap.
 
