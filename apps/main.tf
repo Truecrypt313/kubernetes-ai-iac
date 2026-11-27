@@ -450,3 +450,53 @@ resource "kubernetes_manifest" "lab_staging" {
     }
   }
 }
+
+resource "kubernetes_manifest" "letsencrypt_production" {
+  manifest = {
+    apiVersion = "cert-manager.io/v1"
+    kind       = "Issuer"
+    metadata = {
+      name      = "letsencrypt-production"
+      namespace = kubernetes_namespace_v1.web.metadata[0].name
+    }
+    spec = {
+      acme = {
+        server              = "https://acme-v02.api.letsencrypt.org/directory"
+        email               = var.acme_email
+        privateKeySecretRef = { name = "letsencrypt-production-account" }
+        solvers = [{
+          selector = { dnsNames = [kubernetes_ingress_v1.nginx.spec[0].rule[0].host] }
+          dns01 = {
+            cloudflare = {
+              apiTokenSecretRef = {
+                name = kubernetes_secret_v1.cloudflare_dns01.metadata[0].name
+                key  = "api-token"
+              }
+            }
+          }
+        }]
+      }
+    }
+  }
+
+  depends_on = [helm_release.cert_manager]
+}
+
+resource "kubernetes_manifest" "lab_production" {
+  manifest = {
+    apiVersion = "cert-manager.io/v1"
+    kind       = "Certificate"
+    metadata = {
+      name      = "lab-motion1-de-production"
+      namespace = kubernetes_namespace_v1.web.metadata[0].name
+    }
+    spec = {
+      dnsNames   = [kubernetes_ingress_v1.nginx.spec[0].rule[0].host]
+      secretName = "lab-motion1-de-production-tls"
+      issuerRef = {
+        name = kubernetes_manifest.letsencrypt_production.manifest.metadata.name
+        kind = "Issuer"
+      }
+    }
+  }
+}
