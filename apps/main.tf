@@ -287,7 +287,11 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "lab" {
     ingress = [
       {
         hostname = kubernetes_ingress_v1.nginx.spec[0].rule[0].host
-        service  = "http://${helm_release.traefik.name}.${helm_release.traefik.namespace}.svc.cluster.local:80"
+        service  = "https://${helm_release.traefik.name}.${helm_release.traefik.namespace}.svc.cluster.local:443"
+        origin_request = {
+          origin_server_name = kubernetes_ingress_v1.nginx_https.spec[0].rule[0].host
+          no_tls_verify      = false
+        }
       },
       { service = "http_status:404" }
     ]

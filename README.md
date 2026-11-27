@@ -31,7 +31,8 @@ Das Projekt dient als DevOps-Portfolio und demonstriert KI-gestützte Infrastruc
 - [x] Traefik installieren
 - [x] Cloudflare mit motion1.de verbinden
 - [x] Tunnel und DNS über Terraform konfigurieren
-- [ ] Origin-HTTPS und automatische Zertifikatsverwaltung einrichten
+- [x] Automatische Zertifikatsverwaltung und Traefik-HTTPS einrichten
+- [ ] Cloudflare-Tunnel auf validiertes Origin-HTTPS umstellen
 - [x] Prometheus und Grafana bereitstellen
 - [x] Kubernetes MCP in Codex integrieren
 - [ ] GitHub Actions für Codevalidierung einrichten
@@ -49,6 +50,8 @@ aus dem Cluster heraus auf. Traefik leitet intern an die beiden Nginx-Pods
 weiter. Prometheus und Grafana sind lokal per Port-Forwarding erreichbar.
 Codex liest freigegebene Kubernetes-Ressourcen über einen lokalen MCP-Prozess.
 `cluster/` verwaltet kind, `apps/` die Anwendungen und den Cloudflare-Tunnel.
+Traefik bietet zusätzlich getestetes HTTPS auf Port 443 an. Die Umstellung
+des Tunnels auf diesen Port ist vorbereitet und wartet auf Plan und Apply.
 
 ## KI-Workflow
 
@@ -209,8 +212,9 @@ Im Namespace `web` läuft dafür eine Replika von `cloudflared` 2026.11.2 mit
 festem Image-Digest. Sie liest den Tunnel-Token aus einem schreibgeschützt
 eingebundenen Kubernetes-Secret und baut ausgehende Verbindungen zu Cloudflare
 auf. Der Connector benötigt ausgehenden Zugriff auf Port 7844 (UDP für QUIC
-oder TCP für HTTP/2). Der interne Weg zu Traefik nutzt zunächst HTTP.
-cert-manager und Let's Encrypt folgen in einem eigenen Schritt.
+oder TCP für HTTP/2). Der angewendete interne Weg zu Traefik nutzt noch HTTP.
+Die vorbereitete Konfiguration stellt ihn auf HTTPS mit vollständiger
+Zertifikatsprüfung um, wie im folgenden TLS-Abschnitt beschrieben.
 
 Für den authentifizierten Plan im vorbereiteten Terminal werden diese
 Umgebungsvariablen benötigt:
@@ -250,8 +254,9 @@ gültigem TLS und der Nginx-Startseite „Welcome to nginx!“.
 
 ## cert-manager und TLS am Traefik-Origin
 
-Öffentliches HTTPS endet derzeit bei Cloudflare. Der nächste Meilenstein
-sichert zusätzlich den internen Hop von `cloudflared` zu Traefik ab.
+Öffentliches HTTPS endet derzeit bei Cloudflare. Traefik stellt inzwischen
+ein gültiges Let's-Encrypt-Produktionszertifikat bereit. Der vorbereitete
+nächste Schritt sichert den internen Hop von `cloudflared` zu Traefik ab.
 
 1. `apps/main.tf` verwaltet den Namespace `cert-manager` und das offizielle
    [cert-manager-Chart v1.21.3](https://cert-manager.io/docs/installation/helm/)
@@ -277,17 +282,38 @@ sichert zusätzlich den internen Hop von `cloudflared` zu Traefik ab.
    Beide Issuer und beide Certificates wurden nach dem manuellen
    Production-Apply als `Ready` bestätigt. Das Produktionszertifikat ist
    bis zum 25.02.2027 gültig.
-   Bis zur späteren Aktivierung des Zertifikats läuft der Origin-Traffic
-   weiterhin per HTTP zu Traefik.
-4. Nach erfolgreicher Production-Ausstellung den HTTPS-Entrypoint von Traefik
-   parallel zur bisherigen HTTP-Route aktivieren. Das Zertifikat lokal mit
-   Port-Forwarding und SNI `lab.motion1.de` prüfen. Erst danach den Tunnel
-   auf `https://traefik.web.svc.cluster.local:443` umstellen.
-   [`originServerName`](https://developers.cloudflare.com/tunnel/troubleshooting/https-origins/)
-   auf `lab.motion1.de` setzen. `cloudflared` verwendet diesen Namen für SNI
-   und prüft Hostname und Zertifikatskette. `no_tls_verify` bleibt `false`.
-   Zum Abschluss HTTPS öffentlich erneut testen. Die HTTP-Route bleibt bis
-   dahin als Rückfallweg verfügbar.
+4. Der HTTPS-Entrypoint und der Ingress `nginx-https` aus PR #9 sind angewendet.
+   Am 27.11.2026 lieferten lokales HTTPS über Traefik und öffentliches HTTPS
+   über Cloudflare jeweils HTTP/2 200 mit der Nginx-Startseite und ohne
+   Zertifikatsfehler. OpenSSL bestätigte die Zertifikatskette und den Hostnamen;
+   ein absichtlich falscher Prüfhostname wurde abgewiesen. Die bisherige
+   lokale HTTP-Route lieferte weiterhin HTTP 200. Nginx war mit zwei Replikas
+   bereit, Traefik und cloudflared jeweils mit einer. Beide Issuer und beide
+   Certificates waren `Ready`.
+5. `feat/cloudflare-origin-tls` bereitet ausschließlich die Tunnelroute auf
+   `https://traefik.web.svc.cluster.local:443` vor. Im
+   [Cloudflare-Provider 5.29.0](https://github.com/cloudflare/terraform-provider-cloudflare/blob/v5.29.0/docs/resources/zero_trust_tunnel_cloudflared_config.md)
+   heißt der Block `origin_request`. `origin_server_name` übernimmt
+   `lab.motion1.de` aus dem HTTPS-Ingress und stellt damit auch die
+   Terraform-Abhängigkeit zu diesem Ingress her. `no_tls_verify = false`
+   lässt die Prüfung von Zertifikatskette, Gültigkeit und Hostname aktiv;
+   das öffentliche Let's-Encrypt-Zertifikat benötigt keinen eigenen CA-Pool.
+   Siehe [Cloudflare-Origin-Parameter](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/origin-parameters/#tls-settings).
+   Initialisierung mit unveränderter Lockdatei, Formatprüfung und Validierung
+   waren erfolgreich. Provider-Schema und Terraform-Abhängigkeitsgraph wurden
+   ebenfalls geprüft. Alle anderen Terraform-Ressourcen sind unverändert.
+   Der authentifizierte Plan im vorbereiteten Terminal soll ausschließlich
+   `cloudflare_zero_trust_tunnel_cloudflared_config.lab` aktualisieren
+   (`0 to add, 1 to change, 0 to destroy`). Er wurde hier mangels der separaten
+   Cloudflare-Umgebung nicht ausgeführt. Merge und Apply stehen noch aus;
+   anschließend den öffentlichen HTTPS-Test wiederholen und die
+   Tunnel-Verbindung prüfen. Erst dann ist der Origin-HTTPS-Schritt abgeschlossen.
+
+Der HTTP-Entrypoint auf Port 80 und der HTTP-Ingress `nginx` bleiben unverändert
+als Rückfallweg erhalten. Ein Rückwechsel erfolgt bewusst über Terraform:
+die Tunnel-`service`-URL wieder auf `http://traefik.web.svc.cluster.local:80`
+setzen und `origin_request` entfernen, dann den Plan prüfen und das Apply
+freigeben. Bei einem TLS-Fehler gibt es keinen automatischen Rückfall auf HTTP.
 
 Für den authentifizierten App-Plan im vorbereiteten Terminal zusätzlich
 zu den [Cloudflare-Variablen für den Tunnel](#cloudflare-tunnel) setzen:
@@ -317,10 +343,11 @@ Terraform aktiviert zusätzlich `websecure` auf dem internen Traefik-Service
 an Port 443. `web` bleibt der Standard-Entrypoint für die bestehende
 HTTP-Ingress-Regel. Die neue Ingress-Regel `nginx-https` nutzt ausdrücklich
 `websecure`, aktiviert TLS und referenziert `lab-motion1-de-production-tls`.
-Der authentifizierte App-Plan soll einen neuen Ingress und eine Aktualisierung
-des Traefik-Releases zeigen. Der Cloudflare-Tunnel führt weiterhin auf Port 80.
+PR #9 wurde mit `1 to add, 1 to change, 0 to destroy` geplant und anschließend
+manuell angewendet. Beide Entrypoints sind verfügbar. Der angewendete
+Cloudflare-Tunnel führt bis zur nächsten Freigabe weiterhin auf Port 80.
 
-Nach freigegebenem Apply im ersten Terminal vom Projektverzeichnis aus:
+Im ersten Terminal vom Projektverzeichnis aus:
 
 ```sh
 kubectl_lab="${XDG_CACHE_HOME:-$HOME/.cache}/kubernetes-ai-iac/kubectl/v1.35.8/kubectl"
@@ -344,8 +371,10 @@ CA-Speicher. Zusätzlich lässt sich der TLS-Handshake separat prüfen:
 openssl s_client -connect 127.0.0.1:8443 -servername lab.motion1.de -verify_hostname lab.motion1.de -verify_return_error -CApath /etc/ssl/certs </dev/null
 ```
 
-Erwartet ist `Verify return code: 0 (ok)`. Port-Forwarding mit `Ctrl+C` beenden.
-Die lokale HTTPS-Prüfung steht bis zur freigegebenen Bereitstellung aus.
+Am 27.11.2026 ergab die Prüfung `Verify return code: 0 (ok)`; curl meldete
+bei lokalem und öffentlichem HTTPS jeweils HTTP/2 200 und TLS-Prüfstatus 0.
+Für den öffentlichen Test `curl --fail --show-error --include https://lab.motion1.de/`
+verwenden. Port-Forwarding mit `Ctrl+C` beenden.
 
 ## Lokales Monitoring
 
