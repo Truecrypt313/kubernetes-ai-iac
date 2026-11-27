@@ -135,8 +135,11 @@ resource "helm_release" "traefik" {
     service      = { spec = { type = "ClusterIP" } }
     ingressClass = { isDefaultClass = false }
     providers    = { kubernetesCRD = { enabled = false } }
-    ports        = { websecure = { enabled = false } }
-    api          = { dashboard = false }
+    ports = {
+      web       = { asDefault = true }
+      websecure = { enabled = true, asDefault = false }
+    }
+    api = { dashboard = false }
   })]
 }
 
@@ -496,6 +499,46 @@ resource "kubernetes_manifest" "lab_production" {
       issuerRef = {
         name = kubernetes_manifest.letsencrypt_production.manifest.metadata.name
         kind = "Issuer"
+      }
+    }
+  }
+}
+
+resource "kubernetes_ingress_v1" "nginx_https" {
+  metadata {
+    name      = "nginx-https"
+    namespace = kubernetes_namespace_v1.web.metadata[0].name
+    annotations = {
+      "traefik.ingress.kubernetes.io/router.entrypoints" = "websecure"
+      "traefik.ingress.kubernetes.io/router.tls"         = "true"
+    }
+  }
+
+  spec {
+    ingress_class_name = helm_release.traefik.name
+
+    tls {
+      hosts       = [kubernetes_ingress_v1.nginx.spec[0].rule[0].host]
+      secret_name = kubernetes_manifest.lab_production.manifest.spec.secretName
+    }
+
+    rule {
+      host = kubernetes_ingress_v1.nginx.spec[0].rule[0].host
+
+      http {
+        path {
+          path      = "/"
+          path_type = "Prefix"
+
+          backend {
+            service {
+              name = kubernetes_service_v1.nginx.metadata[0].name
+              port {
+                number = 80
+              }
+            }
+          }
+        }
       }
     }
   }

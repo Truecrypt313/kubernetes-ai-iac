@@ -269,11 +269,14 @@ sichert zusätzlich den internen Hop von `cloudflared` zu Traefik ab.
    und Certificate `Ready`, und der ACME-Order war `valid`. DNS-01 hat damit
    funktioniert. Cert-manager speichert das Staging-Zertifikat im Secret
    `lab-motion1-de-staging-tls` für die Ausstellungsprobe.
-3. Für Production plant Terraform den Issuer `letsencrypt-production` und
+3. Für Production verwaltet Terraform den Issuer `letsencrypt-production` und
    das Certificate `lab-motion1-de-production`. Beide Umgebungen nutzen das
    vorhandene DNS-01-Secret und dieselbe ACME-Kontaktadresse. Cert-manager
    verwendet für Production die separaten Secrets
    `letsencrypt-production-account` und `lab-motion1-de-production-tls`.
+   Beide Issuer und beide Certificates wurden nach dem manuellen
+   Production-Apply als `Ready` bestätigt. Das Produktionszertifikat ist
+   bis zum 25.02.2027 gültig.
    Bis zur späteren Aktivierung des Zertifikats läuft der Origin-Traffic
    weiterhin per HTTP zu Traefik.
 4. Nach erfolgreicher Production-Ausstellung den HTTPS-Entrypoint von Traefik
@@ -300,14 +303,49 @@ Plänen heraus. Für den Plan weiterhin einen geschützten Speicherort und
 Modus `0600` verwenden, da andere Werte darin sensibel sein können.
 Beim Drehen des DNS-01-Tokens `data_wo_revision` erhöhen.
 
-Der Production-Plan soll nur den neuen Issuer und das Certificate hinzufügen.
-Nach freigegebenem Apply prüfen, dass beide ACME-Ressourcen `Ready` sind:
+Die Zustände des Production-Issuers und des Certificates lassen sich so prüfen:
 
 ```sh
 kubectl_lab="${XDG_CACHE_HOME:-$HOME/.cache}/kubernetes-ai-iac/kubectl/v1.35.8/kubectl"
 "$kubectl_lab" --kubeconfig=cluster/kubeconfig -n web wait --for=condition=Ready issuer/letsencrypt-production --timeout=120s
 "$kubectl_lab" --kubeconfig=cluster/kubeconfig -n web wait --for=condition=Ready certificate/lab-motion1-de-production --timeout=300s
 ```
+
+### Lokaler HTTPS-Test für Traefik
+
+Terraform aktiviert zusätzlich `websecure` auf dem internen Traefik-Service
+an Port 443. `web` bleibt der Standard-Entrypoint für die bestehende
+HTTP-Ingress-Regel. Die neue Ingress-Regel `nginx-https` nutzt ausdrücklich
+`websecure`, aktiviert TLS und referenziert `lab-motion1-de-production-tls`.
+Der authentifizierte App-Plan soll einen neuen Ingress und eine Aktualisierung
+des Traefik-Releases zeigen. Der Cloudflare-Tunnel führt weiterhin auf Port 80.
+
+Nach freigegebenem Apply im ersten Terminal vom Projektverzeichnis aus:
+
+```sh
+kubectl_lab="${XDG_CACHE_HOME:-$HOME/.cache}/kubernetes-ai-iac/kubectl/v1.35.8/kubectl"
+"$kubectl_lab" --kubeconfig=cluster/kubeconfig -n web rollout status deployment/traefik --timeout=120s
+"$kubectl_lab" --kubeconfig=cluster/kubeconfig -n web port-forward --address=127.0.0.1 svc/traefik 8080:80 8443:443
+```
+
+Im zweiten Terminal HTTPS und die bisherige HTTP-Route prüfen:
+
+```sh
+curl --noproxy '*' --fail --show-error --include --resolve lab.motion1.de:8443:127.0.0.1 https://lab.motion1.de:8443/
+curl --noproxy '*' --fail --show-error --include -H 'Host: lab.motion1.de' http://127.0.0.1:8080/
+```
+
+Beide Aufrufe sollen HTTP 200 und die Nginx-Startseite liefern. `--resolve`
+verbindet direkt zum lokalen Port und erhält den Namen `lab.motion1.de` für
+SNI und Hostname-Prüfung. curl prüft die Zertifikatskette mit dem lokalen
+CA-Speicher. Zusätzlich lässt sich der TLS-Handshake separat prüfen:
+
+```sh
+openssl s_client -connect 127.0.0.1:8443 -servername lab.motion1.de -verify_hostname lab.motion1.de -verify_return_error -CApath /etc/ssl/certs </dev/null
+```
+
+Erwartet ist `Verify return code: 0 (ok)`. Port-Forwarding mit `Ctrl+C` beenden.
+Die lokale HTTPS-Prüfung steht bis zur freigegebenen Bereitstellung aus.
 
 ## Lokales Monitoring
 
