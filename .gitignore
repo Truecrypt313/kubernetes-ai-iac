@@ -1,0 +1,30 @@
+# Terraform: lokale Provider, State, Pläne und Fehlerprotokolle
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfplan.*
+*.plan
+*.plan.*
+crash.log
+crash.*.log
+
+# Lokale Terraform-Variablen und CLI-Zugangsdaten
+*.tfvars
+*.tfvars.json
+.terraformrc
+terraform.rc
+
+# Kubernetes-Zugangsdaten
+.kube/
+kubeconfig
+kubeconfig.*
+*.kubeconfig
+
+# Umgebungsvariablen, private Schlüssel und Zertifikatsdateien
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.pfx
