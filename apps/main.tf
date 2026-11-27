@@ -356,3 +356,21 @@ resource "cloudflare_dns_record" "lab" {
 
   depends_on = [kubernetes_deployment_v1.cloudflared]
 }
+
+resource "kubernetes_namespace_v1" "cert_manager" {
+  metadata {
+    name = "cert-manager"
+  }
+}
+
+resource "helm_release" "cert_manager" {
+  name       = "cert-manager"
+  namespace  = kubernetes_namespace_v1.cert_manager.metadata[0].name
+  repository = "oci://quay.io/jetstack/charts"
+  chart      = "cert-manager"
+  version    = "v1.21.3"
+
+  values = [yamlencode({
+    crds = { enabled = true }
+  })]
+}
