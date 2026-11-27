@@ -29,6 +29,21 @@ variable "cloudflare_zone_id" {
   sensitive   = true
 }
 
+variable "cloudflare_dns01_api_token" {
+  description = "Separater Cloudflare-API-Token für die DNS-01-Validierung von motion1.de."
+  type        = string
+  sensitive   = true
+  ephemeral   = true
+  nullable    = false
+}
+
+variable "acme_email" {
+  description = "Kontaktadresse für das Let's-Encrypt-Konto."
+  type        = string
+  sensitive   = true
+  nullable    = false
+}
+
 locals {
   kubeconfig   = abspath("${path.module}/../cluster/kubeconfig")
   kube_context = "kind-kubernetes-ai-iac"
@@ -373,4 +388,65 @@ resource "helm_release" "cert_manager" {
   values = [yamlencode({
     crds = { enabled = true }
   })]
+}
+
+resource "kubernetes_secret_v1" "cloudflare_dns01" {
+  metadata {
+    name      = "cloudflare-dns01-token"
+    namespace = kubernetes_namespace_v1.web.metadata[0].name
+  }
+
+  type             = "Opaque"
+  data_wo          = { "api-token" = var.cloudflare_dns01_api_token }
+  data_wo_revision = 1
+}
+
+resource "kubernetes_manifest" "letsencrypt_staging" {
+  manifest = {
+    apiVersion = "cert-manager.io/v1"
+    kind       = "Issuer"
+    metadata = {
+      name      = "letsencrypt-staging"
+      namespace = kubernetes_namespace_v1.web.metadata[0].name
+    }
+    spec = {
+      acme = {
+        server              = "https://acme-staging-v02.api.letsencrypt.org/directory"
+        email               = var.acme_email
+        privateKeySecretRef = { name = "letsencrypt-staging-account" }
+        solvers = [{
+          selector = { dnsNames = [kubernetes_ingress_v1.nginx.spec[0].rule[0].host] }
+          dns01 = {
+            cloudflare = {
+              apiTokenSecretRef = {
+                name = kubernetes_secret_v1.cloudflare_dns01.metadata[0].name
+                key  = "api-token"
+              }
+            }
+          }
+        }]
+      }
+    }
+  }
+
+  depends_on = [helm_release.cert_manager]
+}
+
+resource "kubernetes_manifest" "lab_staging" {
+  manifest = {
+    apiVersion = "cert-manager.io/v1"
+    kind       = "Certificate"
+    metadata = {
+      name      = "lab-motion1-de-staging"
+      namespace = kubernetes_namespace_v1.web.metadata[0].name
+    }
+    spec = {
+      dnsNames   = [kubernetes_ingress_v1.nginx.spec[0].rule[0].host]
+      secretName = "lab-motion1-de-staging-tls"
+      issuerRef = {
+        name = kubernetes_manifest.letsencrypt_staging.manifest.metadata.name
+        kind = "Issuer"
+      }
+    }
+  }
 }
