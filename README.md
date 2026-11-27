@@ -253,24 +253,21 @@ gültigem TLS und der Nginx-Startseite „Welcome to nginx!“.
 Öffentliches HTTPS endet derzeit bei Cloudflare. Der nächste Meilenstein
 sichert zusätzlich den internen Hop von `cloudflared` zu Traefik ab.
 
-1. `apps/main.tf` ergänzt den Namespace `cert-manager` und das offizielle
+1. `apps/main.tf` verwaltet den Namespace `cert-manager` und das offizielle
    [cert-manager-Chart v1.21.3](https://cert-manager.io/docs/installation/helm/)
-   mit `crds.enabled = true`. Helm 3.20.2 rendert das Chart für Kubernetes
-   1.35.8 mit drei Deployments und sechs CRDs. Für die Freigabe im
-   vorbereiteten Terminal prüfen, dass der App-Plan nur den Namespace und
-   das Helm-Release anlegt. Nach dem Apply auf die CRDs und den Webhook warten.
-   Der Kubernetes-Provider braucht die CRDs bereits beim Planen von `Issuer`
-   und `Certificate`.
-2. In einem Folgeschritt einen `Issuer` und ein `Certificate` für
-   `lab.motion1.de` im Namespace `web` ergänzen und
-   [DNS-01](https://cert-manager.io/docs/configuration/acme/dns01/cloudflare/)
-   zuerst mit Let's Encrypt Staging prüfen. Dafür einen separaten
-   Cloudflare-Token mit `Zone Read` und `DNS Edit` nur für `motion1.de`
-   und eine ACME-Kontaktadresse bereithalten. Der Token ist für diesen
-   Installationsschritt noch nicht nötig. Später wird er als sensitive
-   temporäre Terraform-Variable `TF_VAR_cloudflare_dns01_api_token` an ein
-   Kubernetes-Secret in `web` übergeben. Der Issuer referenziert das Secret
-   über `apiTokenSecretRef`. Das Staging-Zertifikat dient als Ausstellungsprobe.
+   mit `crds.enabled = true`. Nach dem manuellen Apply waren alle drei Pods
+   bereit, alle sechs CRDs registriert und der Webhook im Server-Dry-Run
+   funktionsfähig. Auf einem neuen Cluster zuerst das Chart installieren und
+   auf CRDs und Webhook warten. Der Kubernetes-Provider braucht die CRDs
+   bereits beim Planen von `Issuer` und `Certificate`.
+2. Im Namespace `web` ergänzt Terraform das Secret `cloudflare-dns01-token`,
+   den [Let’s-Encrypt-Staging-Issuer](https://letsencrypt.org/docs/staging-environment/)
+   `letsencrypt-staging` und das Certificate `lab-motion1-de-staging`.
+   Der Issuer referenziert das Secret über `apiTokenSecretRef` für
+   [DNS-01](https://cert-manager.io/docs/configuration/acme/dns01/cloudflare/).
+   Cert-manager schreibt das Staging-Zertifikat in `lab-motion1-de-staging-tls`.
+   Dieses Secret dient nur zur Ausstellungsprobe. Cloudflared nutzt weiterhin
+   die HTTP-Route zu Traefik.
 3. Nach dem Staging-Test das Produktionszertifikat ausstellen und den
    HTTPS-Entrypoint von Traefik parallel zur bisherigen HTTP-Route aktivieren.
    Das Zertifikat lokal mit
@@ -281,6 +278,29 @@ sichert zusätzlich den internen Hop von `cloudflared` zu Traefik ab.
    und prüft Hostname und Zertifikatskette. `no_tls_verify` bleibt `false`.
    Zum Abschluss HTTPS öffentlich erneut testen. Die HTTP-Route bleibt bis
    dahin als Rückfallweg verfügbar.
+
+Für den authentifizierten Staging-Plan im vorbereiteten Terminal zusätzlich
+zu den [Cloudflare-Variablen für den Tunnel](#cloudflare-tunnel) setzen:
+
+| Variable | Zweck |
+|---|---|
+| `TF_VAR_cloudflare_dns01_api_token` | Separater Cloudflare-Token mit `Zone Read` und `DNS Edit` nur für `motion1.de` |
+| `TF_VAR_acme_email` | Kontaktadresse für das ACME-Konto |
+
+Den DNS-01-Token beim Plan und beim späteren Apply über die Umgebung setzen.
+`ephemeral` und `data_wo` halten ihn aus Terraform-State und gespeicherten
+Plänen heraus. Für den Plan weiterhin einen geschützten Speicherort und
+Modus `0600` verwenden, da andere Werte darin sensibel sein können.
+Beim Drehen des DNS-01-Tokens `data_wo_revision` erhöhen.
+
+Der App-Plan soll genau Secret, Issuer und Certificate hinzufügen. Nach
+freigegebenem Apply prüfen, dass beide ACME-Ressourcen `Ready` sind:
+
+```sh
+kubectl_lab="${XDG_CACHE_HOME:-$HOME/.cache}/kubernetes-ai-iac/kubectl/v1.35.8/kubectl"
+"$kubectl_lab" --kubeconfig=cluster/kubeconfig -n web wait --for=condition=Ready issuer/letsencrypt-staging --timeout=120s
+"$kubectl_lab" --kubeconfig=cluster/kubeconfig -n web wait --for=condition=Ready certificate/lab-motion1-de-staging --timeout=300s
+```
 
 ## Lokales Monitoring
 
