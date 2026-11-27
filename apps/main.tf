@@ -137,3 +137,44 @@ resource "kubernetes_ingress_v1" "nginx" {
     }
   }
 }
+
+resource "kubernetes_namespace_v1" "monitoring" {
+  metadata {
+    name = "monitoring"
+  }
+}
+
+resource "helm_release" "monitoring" {
+  name       = "monitoring"
+  namespace  = kubernetes_namespace_v1.monitoring.metadata[0].name
+  repository = "https://prometheus-community.github.io/helm-charts"
+  chart      = "kube-prometheus-stack"
+  version    = "94.1.0"
+
+  values = [yamlencode({
+    alertmanager       = { enabled = false }
+    defaultRules       = { rules = { alertmanager = false } }
+    prometheusOperator = { enabled = true }
+    nodeExporter       = { enabled = true }
+    kubeStateMetrics   = { enabled = true }
+
+    prometheus = {
+      enabled        = true
+      ingress        = { enabled = false }
+      service        = { type = "ClusterIP" }
+      prometheusSpec = { retention = "24h" }
+    }
+
+    grafana = {
+      enabled = true
+      ingress = { enabled = false }
+      service = { type = "ClusterIP" }
+    }
+
+    # Diese Metrik-Endpunkte sind in kind nur auf Loopback gebunden.
+    kubeEtcd              = { enabled = false }
+    kubeControllerManager = { enabled = false }
+    kubeScheduler         = { enabled = false }
+    kubeProxy             = { enabled = false }
+  })]
+}
