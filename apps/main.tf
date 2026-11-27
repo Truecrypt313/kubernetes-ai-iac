@@ -178,3 +178,61 @@ resource "helm_release" "monitoring" {
     kubeProxy             = { enabled = false }
   })]
 }
+
+resource "kubernetes_service_account_v1" "codex_mcp" {
+  metadata {
+    name      = "codex-mcp"
+    namespace = kubernetes_namespace_v1.web.metadata[0].name
+  }
+
+  automount_service_account_token = false
+}
+
+resource "kubernetes_cluster_role_v1" "codex_mcp" {
+  metadata {
+    name = "codex-mcp-read-only"
+  }
+
+  rule {
+    api_groups = [""]
+    resources  = ["events", "pods", "services"]
+    verbs      = ["get", "list"]
+  }
+
+  rule {
+    api_groups = ["apps"]
+    resources  = ["daemonsets", "deployments", "statefulsets"]
+    verbs      = ["get", "list"]
+  }
+
+  rule {
+    api_groups = ["networking.k8s.io"]
+    resources  = ["ingresses"]
+    verbs      = ["get", "list"]
+  }
+}
+
+resource "kubernetes_role_binding_v1" "codex_mcp" {
+  for_each = {
+    web        = kubernetes_namespace_v1.web.metadata[0].name
+    monitoring = kubernetes_namespace_v1.monitoring.metadata[0].name
+  }
+
+  metadata {
+    name      = "codex-mcp-read-only"
+    namespace = each.value
+  }
+
+  role_ref {
+    api_group = "rbac.authorization.k8s.io"
+    kind      = "ClusterRole"
+    name      = kubernetes_cluster_role_v1.codex_mcp.metadata[0].name
+  }
+
+  subject {
+    api_group = ""
+    kind      = "ServiceAccount"
+    name      = kubernetes_service_account_v1.codex_mcp.metadata[0].name
+    namespace = kubernetes_service_account_v1.codex_mcp.metadata[0].namespace
+  }
+}
