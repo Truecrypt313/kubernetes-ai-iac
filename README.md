@@ -29,19 +29,26 @@ Das Projekt dient als DevOps-Portfolio und demonstriert KI-gestützte Infrastruc
 - [x] Kubernetes-Cluster mit Terraform bereitstellen
 - [x] Nginx-Webseite mit Deployment und Service bereitstellen
 - [x] Traefik installieren
-- [ ] Cloudflare mit motion1.de verbinden
-- [ ] Tunnel und DNS über Terraform konfigurieren
-- [ ] HTTPS und automatische Zertifikatsverwaltung einrichten
+- [x] Cloudflare mit motion1.de verbinden
+- [x] Tunnel und DNS über Terraform konfigurieren
+- [ ] Origin-HTTPS und automatische Zertifikatsverwaltung einrichten
 - [x] Prometheus und Grafana bereitstellen
 - [x] Kubernetes MCP in Codex integrieren
 - [ ] GitHub Actions für Codevalidierung einrichten
 - [ ] Vollständigen Aufbau und Abbau testen
 
-## Zielarchitektur
+## Aktuelle Architektur
 
-Die Webseite wird lokal im Kubernetes-Cluster betrieben und über Cloudflare Tunnel unter https://lab.motion1.de veröffentlicht.
+```text
+Browser ── HTTPS ──► Cloudflare ── verschlüsselter Tunnel ──► cloudflared in kind
+                                                            └─ HTTP ─► Traefik ─► Nginx
+```
 
-Der Cluster und seine Anwendungen werden durch getrennte Terraform-Konfigurationen verwaltet.
+Cloudflare liefert `https://lab.motion1.de` aus. `cloudflared` baut den Tunnel
+aus dem Cluster heraus auf. Traefik leitet intern an die beiden Nginx-Pods
+weiter. Prometheus und Grafana sind lokal per Port-Forwarding erreichbar.
+Codex liest freigegebene Kubernetes-Ressourcen über einen lokalen MCP-Prozess.
+`cluster/` verwaltet kind, `apps/` die Anwendungen und den Cloudflare-Tunnel.
 
 ## KI-Workflow
 
@@ -152,8 +159,9 @@ Vom Projektverzeichnis aus prüfen:
 terraform -chdir=apps init -input=false -lockfile=readonly
 terraform -chdir=apps fmt -check
 terraform -chdir=apps validate
-terraform -chdir=apps plan -input=false -detailed-exitcode
 ```
+
+Für den App-Plan sind die unten dokumentierten Cloudflare-Variablen nötig.
 
 Am 27.11.2026 erstellte `terraform apply` mit dem geprüften Plan genau fünf
 Ressourcen. Beide Nginx-Pods waren bereit und im Service registriert. Traefik
@@ -184,12 +192,9 @@ IP und funktioniert unabhängig vom öffentlichen DNS. Port-Forwarding mit
 
 ## Cloudflare DNS
 
-Am 27.11.2026 wurden bei STRATO für `motion1.de` die Cloudflare-Nameserver
-eingetragen. Die erneute Prüfung nach dem MCP-Apply bestätigte die öffentliche
-Delegation an `major.ns.cloudflare.com` und `maleah.ns.cloudflare.com` bei der
-`.de`-Zone und den öffentlichen Resolvern `1.1.1.1` und `8.8.8.8`. Beide
-Cloudflare-Nameserver antworteten autoritativ für die Zone. Der Status `Active`
-im Cloudflare-Dashboard ist noch zu bestätigen.
+`motion1.de` ist seit dem 27.11.2026 öffentlich an `major.ns.cloudflare.com`
+und `maleah.ns.cloudflare.com` delegiert. Beide Nameserver antworten
+autoritativ. Cloudflare liefert die Seite unter `https://lab.motion1.de` aus.
 
 ## Cloudflare Tunnel
 
@@ -217,8 +222,9 @@ Umgebungsvariablen benötigt:
 | `TF_VAR_cloudflare_zone_id` | Zone-ID von `motion1.de` im selben Konto |
 
 Die Werte lokal in der Umgebung setzen, etwa über einen Passwortmanager.
-Vor dem Plan im Cloudflare-Dashboard prüfen, dass die Zone `Active` ist und
-`lab.motion1.de` noch keinen DNS-Eintrag hat. Vom Projektverzeichnis aus:
+Bei einem Neuaufbau im Cloudflare-Dashboard prüfen, dass die Zone `Active`
+ist und `lab.motion1.de` nicht durch einen anderen DNS-Eintrag belegt ist.
+Vom Projektverzeichnis aus:
 
 ```sh
 set +x
@@ -236,8 +242,45 @@ Geheimnisdateien und gehören nicht in Git oder in geteilte Ausgaben. State und
 Plan im Modus `0600` halten, Pläne nach Gebrauch löschen und für die Prüfung
 die normale Terraform-Ausgabe ohne Debug-Logs oder JSON-Export verwenden.
 
-Initialisierung, Formatierung und Validierung sind abgeschlossen. Der
-authentifizierte Plan und die Bereitstellung stehen aus.
+Der authentifizierte Plan und das manuelle Apply vom 27.11.2026 meldeten je
+fünf neue Ressourcen, keine Änderungen und keine Löschungen. Bei der
+Laufzeitprüfung war `cloudflared` bereit und hatte vier Tunnel-Verbindungen
+registriert. Die öffentliche Seite lieferte HTTP/2 200 über Cloudflare mit
+gültigem TLS und der Nginx-Startseite „Welcome to nginx!“.
+
+## cert-manager und TLS am Traefik-Origin
+
+Öffentliches HTTPS endet derzeit bei Cloudflare. Der nächste Meilenstein
+sichert zusätzlich den internen Hop von `cloudflared` zu Traefik ab.
+
+1. `apps/main.tf` ergänzt den Namespace `cert-manager` und das offizielle
+   [cert-manager-Chart v1.21.3](https://cert-manager.io/docs/installation/helm/)
+   mit `crds.enabled = true`. Helm 3.20.2 rendert das Chart für Kubernetes
+   1.35.8 mit drei Deployments und sechs CRDs. Für die Freigabe im
+   vorbereiteten Terminal prüfen, dass der App-Plan nur den Namespace und
+   das Helm-Release anlegt. Nach dem Apply auf die CRDs und den Webhook warten.
+   Der Kubernetes-Provider braucht die CRDs bereits beim Planen von `Issuer`
+   und `Certificate`.
+2. In einem Folgeschritt einen `Issuer` und ein `Certificate` für
+   `lab.motion1.de` im Namespace `web` ergänzen und
+   [DNS-01](https://cert-manager.io/docs/configuration/acme/dns01/cloudflare/)
+   zuerst mit Let's Encrypt Staging prüfen. Dafür einen separaten
+   Cloudflare-Token mit `Zone Read` und `DNS Edit` nur für `motion1.de`
+   und eine ACME-Kontaktadresse bereithalten. Der Token ist für diesen
+   Installationsschritt noch nicht nötig. Später wird er als sensitive
+   temporäre Terraform-Variable `TF_VAR_cloudflare_dns01_api_token` an ein
+   Kubernetes-Secret in `web` übergeben. Der Issuer referenziert das Secret
+   über `apiTokenSecretRef`. Das Staging-Zertifikat dient als Ausstellungsprobe.
+3. Nach dem Staging-Test das Produktionszertifikat ausstellen und den
+   HTTPS-Entrypoint von Traefik parallel zur bisherigen HTTP-Route aktivieren.
+   Das Zertifikat lokal mit
+   Port-Forwarding und SNI `lab.motion1.de` prüfen. Erst danach den Tunnel
+   auf `https://traefik.web.svc.cluster.local:443` umstellen.
+   [`originServerName`](https://developers.cloudflare.com/tunnel/troubleshooting/https-origins/)
+   auf `lab.motion1.de` setzen. `cloudflared` verwendet diesen Namen für SNI
+   und prüft Hostname und Zertifikatskette. `no_tls_verify` bleibt `false`.
+   Zum Abschluss HTTPS öffentlich erneut testen. Die HTTP-Route bleibt bis
+   dahin als Rückfallweg verfügbar.
 
 ## Lokales Monitoring
 
@@ -261,6 +304,8 @@ und keine Scrape-Fehler. Prometheus und Grafana antworteten über Port-Forwardin
 mit HTTP 200. Grafana konnte die 12 `up`-Zeitreihen aus Prometheus abrufen.
 Nginx antwortete über Traefik weiterhin mit HTTP 200 für `lab.motion1.de`.
 Die Folgepläne für `apps/` und `cluster/` meldeten keine Änderungen.
+
+Auch nach der Tunnel-Bereitstellung waren alle 12 Prometheus-Ziele `up`.
 
 Grafanas Readiness-Prüfung meldete beim Start drei abgelehnte Verbindungen.
 Danach war Grafana bereit. Dem Node Exporter fehlen udev-Zusatzdaten im
@@ -308,6 +353,10 @@ verbotene Abfragen. Echte MCP-Aufrufe lasen Pods, Deployments und Services in
 abgewiesen. Eine generische Pod-Liste ohne Namespace verwendet `web` aus dem
 kubeconfig-Kontext. Der Codex-App-Server konnte die Pods in `web` über MCP lesen.
 Die Folgepläne für `apps/` und `cluster/` meldeten keine Änderungen.
+
+Nach der Tunnel-Bereitstellung las Codex über MCP in `web` vier Pods, drei
+Deployments, zwei Services und einen Ingress. Eine Secret-Liste wurde
+abgewiesen.
 
 Eine separate kubeconfig mit kurzlebigem Token liegt lokal vor. Bei Ablauf
 vom Projektverzeichnis aus mit `jq` und dem kubectl aus dem Projektcache
