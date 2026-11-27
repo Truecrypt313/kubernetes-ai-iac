@@ -1,494 +1,171 @@
-# Kubernetes AI Infrastructure as Code
+# Kubernetes Platform Lab
 
-## Projektziel
+**Infrastructure as code. Validated HTTPS. Observable workloads. AI-assisted operations.**
 
-Automatisierte Bereitstellung einer lokalen Kubernetes-Infrastruktur mit Terraform, öffentlich erreichbarer Webseite, DNS, HTTPS und Monitoring.
+A DevOps portfolio project that turns a local Kubernetes cluster into a public HTTPS service using Terraform, Helm and Cloudflare Tunnel. It demonstrates infrastructure delivery, operational verification and a read-only AI integration—with human approval before infrastructure changes.
 
-Das Projekt dient als DevOps-Portfolio und demonstriert KI-gestützte Infrastructure as Code.
+![Kubernetes](https://img.shields.io/badge/Kubernetes-326CE5?style=flat-square&logo=kubernetes&logoColor=white)
+![Terraform](https://img.shields.io/badge/Terraform-844FBA?style=flat-square&logo=terraform&logoColor=white)
+![Helm](https://img.shields.io/badge/Helm-0F1689?style=flat-square&logo=helm&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat-square&logo=docker&logoColor=white)
+![Traefik](https://img.shields.io/badge/Traefik-24A1C1?style=flat-square&logo=traefikproxy&logoColor=white)
+![Cloudflare](https://img.shields.io/badge/Cloudflare-F38020?style=flat-square&logo=cloudflare&logoColor=white)
+![cert-manager](https://img.shields.io/badge/cert--manager-0066FF?style=flat-square)
+![Prometheus](https://img.shields.io/badge/Prometheus-E6522C?style=flat-square&logo=prometheus&logoColor=white)
+![Grafana](https://img.shields.io/badge/Grafana-F46800?style=flat-square&logo=grafana&logoColor=white)
+![MCP](https://img.shields.io/badge/MCP-read--only-334155?style=flat-square)
 
-## Technologie-Stack
+[**Live demo ↗**](https://lab.motion1.de) · [Architecture](#architecture) · [Deployment guide — German](docs/deployment.md) · [Roadmap](#roadmap)
 
-| Technologie | Aufgabe |
+> **Locally hosted:** the demo runs on a local workstation through Cloudflare Tunnel. Availability depends on the workstation and connector. It serves the default Nginx page; the infrastructure is the portfolio deliverable.
+
+## What this project demonstrates
+
+| Area | Implemented capability |
 |---|---|
-| Terraform | Infrastruktur als Code |
-| Docker / kind | Lokaler Kubernetes-Cluster |
-| Helm | Installation von Kubernetes-Anwendungen |
-| Nginx | Webserver |
-| Traefik | Ingress und Load Balancing |
-| Cloudflare Tunnel | Öffentliche Erreichbarkeit |
-| Cloudflare DNS | DNS-Verwaltung |
-| cert-manager / Let's Encrypt | Automatische TLS-Zertifikate |
-| Prometheus Operator / Grafana | Monitoring |
-| Git / GitHub | Versionierung und CI |
-| Codex / MCP | KI-gestützte Infrastrukturverwaltung |
+| Infrastructure as code | Two small Terraform configurations: a single-node kind cluster and its applications, with pinned providers and committed lockfiles. |
+| Application delivery | Two Nginx replicas behind a ClusterIP service and Traefik HTTP/HTTPS ingress. |
+| Public access | Terraform-managed Cloudflare Tunnel and DNS, with no router port forwarding. |
+| Certificate lifecycle | cert-manager with separate Let's Encrypt staging and production issuers, DNS-01 validation and a production TLS certificate. |
+| Observability | Prometheus Operator, Prometheus, Grafana, Node Exporter and kube-state-metrics, accessed privately through local port forwarding. |
+| AI-assisted operations | Codex in VS Code uses a local Kubernetes MCP server to inspect approved resources in `web` and `monitoring`. |
+
+**Recorded verification — 27 November 2026:** public and local HTTPS returned HTTP/2 200 with valid certificates; both Nginx replicas were ready; Prometheus reported 12/12 scrape targets up. These are documented test results, not uptime or performance guarantees. [Validation records and commands →](docs/deployment.md#cloudflare-tunnel)
+
+## Architecture
+
+```mermaid
+flowchart LR
+    browser["Browser"] -->|"HTTPS"| cf["Cloudflare DNS + HTTPS edge"]
+
+    subgraph cluster["Local workstation · Docker / kind · one Kubernetes node"]
+        subgraph web["Namespace: web"]
+            connector["cloudflared"]
+            traefik["Traefik<br/>websecure :443"]
+            nginx["Nginx ClusterIP :80<br/>2 Nginx replicas"]
+            connector -->|"HTTPS :443<br/>Certificate validated"| traefik
+            traefik -->|"HTTP :80"| nginx
+        end
+        cm["Namespace: cert-manager<br/>Let's Encrypt via DNS-01"]
+        subgraph monitoring["Namespace: monitoring · private"]
+            direction LR
+            grafana["Grafana"] -->|"PromQL"| prometheus["Prometheus"]
+            prometheus -->|"Scrape"| exporters["Node Exporter<br/>kube-state-metrics"]
+        end
+    end
+
+    cf -->|"Encrypted tunnel<br/>Connector dials out"| connector
+    cm -.->|"Production TLS Secret in web"| traefik
+
+    classDef edge fill:#fff4e6,stroke:#d97706,color:#7c2d12
+    classDef workload fill:#eff6ff,stroke:#2563eb,color:#1e3a8a
+    classDef observe fill:#f0fdf4,stroke:#16a34a,color:#14532d
+    class cf edge
+    class connector,traefik,nginx,cm workload
+    class grafana,prometheus,exporters observe
+    style cluster fill:#f8fafc,stroke:#94a3b8,color:#334155
+    style web fill:#f0f7ff,stroke:#93c5fd,color:#1e3a8a
+    style monitoring fill:#f0fdf4,stroke:#86efac,color:#14532d
+```
+
+Cloudflare terminates browser TLS. Inside the cluster, cloudflared connects to `https://traefik.web.svc.cluster.local:443` and validates the origin certificate against **`lab.motion1.de`** (`no_tls_verify = false`). Traefik forwards HTTP to Nginx. Internal HTTP ingress remains available as a deliberate rollback option; TLS failures do not trigger an automatic downgrade.
+
+cert-manager uses Cloudflare DNS-01 validation with separate staging and production issuers. The monitoring stack has no public Ingress. Kubernetes MCP runs locally over stdio, using a separate ServiceAccount and kubeconfig.
+
+## AI-assisted infrastructure workflow
+
+```mermaid
+flowchart LR
+    intent["Describe intent"] --> code["Codex + Terraform"]
+    mcp["Read-only Kubernetes MCP"] -.->|"Cluster context"| code
+    code --> pr["Feature branch + PR<br/>Validate + review plan"]
+    pr --> approval["Explicit human approval<br/>Merge and apply gates"]
+    approval --> apply["Manual apply"]
+    apply --> verify["Verify workloads<br/>and application behavior"]
+```
+
+Codex helps prepare changes and explain plans. The MCP server, [`containers/kubernetes-mcp-server`](https://github.com/containers/kubernetes-mcp-server), provides read-only cluster context. Merge and apply are separate approval steps; the current workflow is manual. GitHub Actions validation is still on the roadmap.
+
+## Security by design
+
+| Control | Implementation |
+|---|---|
+| Least privilege | Dedicated MCP ServiceAccount; `get` and `list` only for selected resource types, scoped by RoleBindings to `web` and `monitoring`. No Secrets, pod exec, pod logs or writes. |
+| Credential separation | MCP uses its own kubeconfig with a short-lived ServiceAccount token, never the administrator kubeconfig. Cloudflare DNS-01 uses a separate API token. |
+| TLS validation | Public HTTPS, an encrypted Cloudflare tunnel and validated origin HTTPS using the Let's Encrypt production certificate. |
+| Secret management | Cloudflare API credentials come from environment variables. Kubernetes Secret writes use write-only attributes; the DNS-01 token variable is ephemeral. cert-manager manages certificate keys in Kubernetes. |
+| Local secret protection | Kubeconfigs, state and saved plans are excluded from Git. Sensitive local files use mode `0600`; the tunnel token can still be present in Terraform state and plans. |
+| Change control | Reviewed feature branches, inspected Terraform plans and explicit approval before merge or apply. Providers and charts are pinned; Nginx, Traefik, cloudflared and the kind node image also use digests. |
+
+## Monitoring & observability
+
+The `kube-prometheus-stack` Helm release provides cluster, node and workload dashboards. The screenshots below are from the actual lab. They show captured observations rather than benchmark results; some request/limit panels show **“No data”** where those resource settings are absent.
+
+[![Grafana cluster dashboard showing CPU, memory and namespace resource usage](docs/images/grafana-cluster.png)](docs/images/grafana-cluster.png)
+
+<details>
+<summary><strong>Explore node and workload dashboards</strong></summary>
+
+**Node view:** CPU, load, memory, disk and network metrics from Node Exporter.
+
+[![Grafana Node Exporter dashboard showing local node resource metrics](docs/images/grafana-node.png)](docs/images/grafana-node.png)
+
+**Workload view:** CPU and memory usage for the cert-manager pods.
+
+[![Grafana namespace dashboard showing the three cert-manager workloads](docs/images/grafana-workloads.png)](docs/images/grafana-workloads.png)
+
+</details>
+
+Prometheus retains metrics for 24 hours. Prometheus and Grafana use temporary storage, and Alertmanager is disabled. This is a single-node learning environment; persistent monitoring storage and high availability are outside the current implementation. [Local access and operational notes →](docs/deployment.md#lokales-monitoring)
+
+<details>
+<summary><strong>View delivery evidence: Cloudflare, website and Kubernetes MCP</strong></summary>
+
+**Cloudflare:** domain overview showing proxied traffic for `motion1.de`.
+
+[![Cloudflare overview for motion1.de showing the domain is proxied](docs/images/cloudflare.png)](docs/images/cloudflare.png)
+
+**Website:** the Nginx page served by the demo.
+
+[![Default Nginx welcome page served by the lab](docs/images/website.png)](docs/images/website.png)
+
+**Kubernetes MCP:** a read-only workload health report for `web` and `monitoring`, including the assessment limits imposed by RBAC.
+
+[![Kubernetes MCP health report showing ready workloads and read-only assessment limits](docs/images/kubernetes-mcp.png)](docs/images/kubernetes-mcp.png)
+
+</details>
+
+## Repository structure
+
+```text
+.
+├── README.md                    # Portfolio overview
+├── cluster/
+│   ├── main.tf                  # Single-node kind cluster
+│   └── .terraform.lock.hcl       # Cluster provider versions and checksums
+├── apps/
+│   ├── main.tf                  # Workloads, tunnel, TLS, monitoring and MCP RBAC
+│   └── .terraform.lock.hcl       # Application provider versions and checksums
+├── .codex/
+│   ├── config.toml              # Project-local Codex MCP integration
+│   └── kubernetes-mcp.toml      # Read-only tools and Secret access restrictions
+├── .gitignore                   # Keeps local credentials, state and plans out of Git
+└── docs/
+    ├── deployment.md            # Full technical guide and validation history (German)
+    └── images/                  # Six reviewed screenshots from the running lab
+```
+
+For exact versions, required environment variables, installation ordering, port-forward commands, TLS checks and MCP setup, see the **[deployment guide](docs/deployment.md)**. It preserves the previous technical README, including its project rules and verification history. Run its commands from the repository root.
 
 ## Roadmap
 
-- [x] Alte Infrastruktur vollständig entfernen
-- [x] Git-Projekt initialisieren
-- [x] Kubernetes-Cluster mit Terraform bereitstellen
-- [x] Nginx-Webseite mit Deployment und Service bereitstellen
-- [x] Traefik installieren
-- [x] Cloudflare mit motion1.de verbinden
-- [x] Tunnel und DNS über Terraform konfigurieren
-- [x] Automatische Zertifikatsverwaltung und Traefik-HTTPS einrichten
-- [ ] Cloudflare-Tunnel auf validiertes Origin-HTTPS umstellen
-- [x] Prometheus und Grafana bereitstellen
-- [x] Kubernetes MCP in Codex integrieren
-- [ ] GitHub Actions für Codevalidierung einrichten
-- [ ] Vollständigen Aufbau und Abbau testen
-
-## Aktuelle Architektur
-
-```text
-Browser ── HTTPS ──► Cloudflare ── verschlüsselter Tunnel ──► cloudflared in kind
-                                                            └─ HTTP ─► Traefik ─► Nginx
-```
-
-Cloudflare liefert `https://lab.motion1.de` aus. `cloudflared` baut den Tunnel
-aus dem Cluster heraus auf. Traefik leitet intern an die beiden Nginx-Pods
-weiter. Prometheus und Grafana sind lokal per Port-Forwarding erreichbar.
-Codex liest freigegebene Kubernetes-Ressourcen über einen lokalen MCP-Prozess.
-`cluster/` verwaltet kind, `apps/` die Anwendungen und den Cloudflare-Tunnel.
-Traefik bietet zusätzlich getestetes HTTPS auf Port 443 an. Die Umstellung
-des Tunnels auf diesen Port ist vorbereitet und wartet auf Plan und Apply.
-
-## KI-Workflow
-
-Natürliche Sprache → Terraform-Code → Git Pull Request → Validierung → Terraform Plan → Manuelle Freigabe → Terraform Apply
-
-Codex verwendet einen lokalen Kubernetes-MCP-Server für lesende Cluster-Abfragen.
-
-## Projektregeln
-
-- Möglichst wenig Code, Dateien und Abhängigkeiten.
-- Keine unnötigen Abstraktionen oder eigenen Frameworks.
-- Ausschließlich etablierte Werkzeuge und Provider.
-- Keine kostenpflichtige Cloud-Infrastruktur.
-- Feste Provider-, Chart- und Image-Versionen.
-- Keine Zugangsdaten, kubeconfigs oder Terraform-State-Dateien in Git.
-- Keine öffentlichen Kubernetes-, MCP- oder Monitoring-Schnittstellen.
-- Keine Infrastrukturänderungen ohne Freigabe.
-- Kleine, nachvollziehbare Git-Commits und Pull Requests.
-- Alle Komponenten müssen reproduzierbar bereitgestellt und entfernt werden können.
-- Technische Entscheidungen und wichtige Befehle kurz dokumentieren.
-
-## Erfolgskriterien
-
-- Kubernetes-Cluster vollständig aus Terraform-Code erzeugbar.
-- Webseite öffentlich über HTTPS erreichbar.
-- Monitoring funktionsfähig.
-- Infrastruktur durch Code skalierbar.
-- KI kann Infrastrukturänderungen vorbereiten und den Cluster analysieren.
-- Vollständiger Neuaufbau und Abbau reproduzierbar.
-
-## Umgebung
-
-- Linux Mint
-- Terraform 1.17.2
-- Docker 29.1.3
-- kind 0.33.0
-- kubectl 1.37.3
-- Helm 4.3.2
-- Domain: motion1.de (STRATO)
-
-## Lokaler Kubernetes-Cluster
-
-`cluster/main.tf` beschreibt einen einzelnen kind-Knoten mit dem Namen
-`kubernetes-ai-iac`. Der Knoten betreibt die Kubernetes-Steuerung und kann
-auch die späteren Anwendungen ausführen. Die Kubernetes-API ist vom Host
-aus nur über `127.0.0.1` und einen automatisch gewählten Port erreichbar.
-
-Die Konfiguration verwendet Terraform 1.17.2, den Community-Provider
-[`tehcyx/kind` 0.13.0](https://github.com/tehcyx/terraform-provider-kind/tree/v0.13.0)
-mit eingebettetem kind 0.33.0 und das
-[`kindest/node`-Image für Kubernetes 1.35.8](https://github.com/kubernetes-sigs/kind/releases/tag/v0.33.0).
-Der Image-Digest fixiert den genauen Inhalt. Die versionierte Datei
-`cluster/.terraform.lock.hcl` fixiert die Provider-Auswahl und Prüfsummen.
-Änderungen an der Cluster-Konfiguration erfordern beim kind-Provider einen
-Neuaufbau und müssen deshalb vor der Ausführung geprüft werden.
-
-Kubernetes 1.35 ist als gemeinsame Basis für den späteren Helm-Provider 3.3.0
-(eingebettetes Helm 3.20.2) und cert-manager 1.21.3 vorgesehen.
-Quellen: [Helm-Provider](https://github.com/hashicorp/terraform-provider-helm/releases/tag/v3.3.0),
-[Helm-Kompatibilität](https://helm.sh/docs/v3/topics/version_skew/),
-[cert-manager-Kompatibilität](https://cert-manager.io/docs/releases/).
-Für die Cluster-Prüfung wurde kubectl 1.35.8 aus dem separaten Projektcache
-verwendet. Das systemweit installierte kubectl 1.37.3 liegt außerhalb der
-[unterstützten Versionsabweichung](https://kubernetes.io/releases/version-skew-policy/).
-
-Vom Projektverzeichnis aus prüfen:
-
-```sh
-terraform -chdir=cluster init -input=false
-terraform -chdir=cluster fmt -check
-terraform -chdir=cluster validate
-terraform -chdir=cluster plan -input=false -detailed-exitcode
-```
-
-Am 27.11.2026 waren Initialisierung, Formatierung und Validierung erfolgreich.
-Der gespeicherte Plan enthielt ausschließlich die Erstellung von `kind_cluster.lab`
-(Exitcode 2). `terraform apply` mit diesem Plan erstellte genau eine Ressource.
-Der Folgeplan meldete keine Änderungen (Exitcode 0).
-
-Die Kubernetes-API meldete unter `/readyz` den Status `ok`. Client und Server
-meldeten Version 1.35.8. Der einzige Knoten war `Ready`, alle fünf Namespaces
-waren `Active`. Die acht Pods in `kube-system` und der Pod in
-`local-path-storage` liefen und waren bereit. Der vollständige Abbau und
-Neuaufbau bleibt ein eigener Roadmap-Schritt.
-
-`cluster/kubeconfig` und `cluster/terraform.tfstate` haben Modus `0600`
-(nur der Besitzer darf lesen und schreiben). Git ignoriert beide Dateien,
-die lokalen Terraform-Daten, gespeicherte Pläne und lokale Geheimnisse.
-Der State kann private Cluster-Schlüssel enthalten und muss außerhalb von
-Git geschützt aufbewahrt und gesichert werden.
-
-## Nginx und Traefik
-
-`apps/main.tf` verwendet die bestehende Cluster-kubeconfig und einen eigenen
-Terraform-State. Der Namespace `web` enthält zwei Nginx-Pods, ihren internen
-Service und Traefik. Der Ingress leitet `lab.motion1.de` über Traefik an den
-Nginx-Service weiter. Beide Services sind vom Typ `ClusterIP`.
-
-Die App-Konfiguration fixiert die Provider Kubernetes 3.5.0 und Helm 3.3.0,
-Nginx 1.30.8 sowie das [offizielle Traefik-Chart 43.0.0](https://github.com/traefik/traefik-helm-chart/releases/tag/v43.0.0)
-mit Traefik 3.8.0. Beide Images sind per Digest festgelegt. Das Chart verlangt
-Kubernetes ab 1.30. Der vorhandene Cluster mit 1.35.8 liegt außerdem im
-unterstützten Bereich des im Helm-Provider eingebetteten Helm 3.20.2.
-
-Vom Projektverzeichnis aus prüfen:
-
-```sh
-terraform -chdir=apps init -input=false -lockfile=readonly
-terraform -chdir=apps fmt -check
-terraform -chdir=apps validate
-```
-
-Für den App-Plan sind die unten dokumentierten Cloudflare-Variablen nötig.
-
-Am 27.11.2026 erstellte `terraform apply` mit dem geprüften Plan genau fünf
-Ressourcen. Beide Nginx-Pods waren bereit und im Service registriert. Traefik
-lief mit einer bereiten Replika. Beide Services waren `ClusterIP` auf Port 80.
-Der Ingress leitete `lab.motion1.de` an Nginx. Der lokale HTTP-Test lieferte
-Status `200` mit der Nginx-Startseite und `404` für einen anderen Host.
-Die Folgepläne für `apps/` und `cluster/` meldeten keine Änderungen.
-
-Für den lokalen Aufruf im ersten Terminal auf die beiden Deployments warten
-und Traefik an Port 8080 weiterleiten:
-
-```sh
-kubectl_lab="${XDG_CACHE_HOME:-$HOME/.cache}/kubernetes-ai-iac/kubectl/v1.35.8/kubectl"
-"$kubectl_lab" --kubeconfig=cluster/kubeconfig -n web rollout status deployment/nginx --timeout=120s
-"$kubectl_lab" --kubeconfig=cluster/kubeconfig -n web rollout status deployment/traefik --timeout=120s
-"$kubectl_lab" --kubeconfig=cluster/kubeconfig -n web port-forward --address=127.0.0.1 svc/traefik 8080:80
-```
-
-Im zweiten Terminal die Nginx-Startseite über den Ingress abrufen:
-
-```sh
-curl -fsS -H 'Host: lab.motion1.de' http://127.0.0.1:8080/ | grep -F 'Welcome to nginx!'
-```
-
-Der `Host`-Header wählt die Ingress-Regel aus. Der Aufruf verwendet die lokale
-IP und funktioniert unabhängig vom öffentlichen DNS. Port-Forwarding mit
-`Ctrl+C` beenden.
-
-## Cloudflare DNS
-
-`motion1.de` ist seit dem 27.11.2026 öffentlich an `major.ns.cloudflare.com`
-und `maleah.ns.cloudflare.com` delegiert. Beide Nameserver antworten
-autoritativ. Cloudflare liefert die Seite unter `https://lab.motion1.de` aus.
-
-## Cloudflare Tunnel
-
-`apps/main.tf` beschreibt einen von Cloudflare verwalteten Tunnel mit dem
-[Cloudflare-Provider 5.29.0](https://github.com/cloudflare/terraform-provider-cloudflare/releases/tag/v5.29.0).
-Seine einzige öffentliche Route ist `lab.motion1.de`. Sie führt über `cloudflared`
-zu `http://traefik.web.svc.cluster.local:80` und über den vorhandenen Ingress
-zu Nginx. Andere Hostnamen erhalten HTTP 404. Terraform legt den proxied CNAME
-erst an, wenn der Connector bereit ist.
-
-Im Namespace `web` läuft dafür eine Replika von `cloudflared` 2026.11.2 mit
-festem Image-Digest. Sie liest den Tunnel-Token aus einem schreibgeschützt
-eingebundenen Kubernetes-Secret und baut ausgehende Verbindungen zu Cloudflare
-auf. Der Connector benötigt ausgehenden Zugriff auf Port 7844 (UDP für QUIC
-oder TCP für HTTP/2). Der angewendete interne Weg zu Traefik nutzt noch HTTP.
-Die vorbereitete Konfiguration stellt ihn auf HTTPS mit vollständiger
-Zertifikatsprüfung um, wie im folgenden TLS-Abschnitt beschrieben.
-
-Für den authentifizierten Plan im vorbereiteten Terminal werden diese
-Umgebungsvariablen benötigt:
-
-| Variable | Zweck |
-|---|---|
-| `CLOUDFLARE_API_TOKEN` | API-Token mit `Cloudflare Tunnel Write` im Zielkonto und `DNS Write` für `motion1.de` |
-| `TF_VAR_cloudflare_account_id` | Account-ID des Zielkontos |
-| `TF_VAR_cloudflare_zone_id` | Zone-ID von `motion1.de` im selben Konto |
-
-Die Werte lokal in der Umgebung setzen, etwa über einen Passwortmanager.
-Bei einem Neuaufbau im Cloudflare-Dashboard prüfen, dass die Zone `Active`
-ist und `lab.motion1.de` nicht durch einen anderen DNS-Eintrag belegt ist.
-Vom Projektverzeichnis aus:
-
-```sh
-set +x
-umask 077
-if test -f apps/terraform.tfstate; then chmod 600 apps/terraform.tfstate; fi
-plan_dir=$(mktemp -d "${TMPDIR:-/tmp}/kubernetes-ai-iac-plan.XXXXXXXX")
-TF_LOG=OFF terraform -chdir=apps plan -input=false -out="$plan_dir/cloudflare.tfplan"
-```
-
-Der API-Token wird direkt aus der Umgebung des Providers gelesen. Der separate
-Tunnel-Token kann über die Cloudflare-Datenquelle im State und in späteren
-Plänen stehen. Das Secret nutzt `data_wo`, damit die Kubernetes-Ressource den
-Token dort nicht zusätzlich ablegt. State, Backups und Pläne sind lokale
-Geheimnisdateien und gehören nicht in Git oder in geteilte Ausgaben. State und
-Plan im Modus `0600` halten, Pläne nach Gebrauch löschen und für die Prüfung
-die normale Terraform-Ausgabe ohne Debug-Logs oder JSON-Export verwenden.
-
-Der authentifizierte Plan und das manuelle Apply vom 27.11.2026 meldeten je
-fünf neue Ressourcen, keine Änderungen und keine Löschungen. Bei der
-Laufzeitprüfung war `cloudflared` bereit und hatte vier Tunnel-Verbindungen
-registriert. Die öffentliche Seite lieferte HTTP/2 200 über Cloudflare mit
-gültigem TLS und der Nginx-Startseite „Welcome to nginx!“.
-
-## cert-manager und TLS am Traefik-Origin
-
-Öffentliches HTTPS endet derzeit bei Cloudflare. Traefik stellt inzwischen
-ein gültiges Let's-Encrypt-Produktionszertifikat bereit. Der vorbereitete
-nächste Schritt sichert den internen Hop von `cloudflared` zu Traefik ab.
-
-1. `apps/main.tf` verwaltet den Namespace `cert-manager` und das offizielle
-   [cert-manager-Chart v1.21.3](https://cert-manager.io/docs/installation/helm/)
-   mit `crds.enabled = true`. Nach dem manuellen Apply waren alle drei Pods
-   bereit, alle sechs CRDs registriert und der Webhook im Server-Dry-Run
-   funktionsfähig. Auf einem neuen Cluster zuerst das Chart installieren und
-   auf CRDs und Webhook warten. Der Kubernetes-Provider braucht die CRDs
-   bereits beim Planen von `Issuer` und `Certificate`.
-2. Im Namespace `web` verwaltet Terraform das Secret `cloudflare-dns01-token`,
-   den [Let’s-Encrypt-Staging-Issuer](https://letsencrypt.org/docs/staging-environment/)
-   `letsencrypt-staging` und das Certificate `lab-motion1-de-staging`.
-   Der Issuer referenziert das Secret über `apiTokenSecretRef` für
-   [DNS-01](https://cert-manager.io/docs/configuration/acme/dns01/cloudflare/).
-   Nach dem manuellen Apply (`3 added, 0 changed, 0 destroyed`) waren Issuer
-   und Certificate `Ready`, und der ACME-Order war `valid`. DNS-01 hat damit
-   funktioniert. Cert-manager speichert das Staging-Zertifikat im Secret
-   `lab-motion1-de-staging-tls` für die Ausstellungsprobe.
-3. Für Production verwaltet Terraform den Issuer `letsencrypt-production` und
-   das Certificate `lab-motion1-de-production`. Beide Umgebungen nutzen das
-   vorhandene DNS-01-Secret und dieselbe ACME-Kontaktadresse. Cert-manager
-   verwendet für Production die separaten Secrets
-   `letsencrypt-production-account` und `lab-motion1-de-production-tls`.
-   Beide Issuer und beide Certificates wurden nach dem manuellen
-   Production-Apply als `Ready` bestätigt. Das Produktionszertifikat ist
-   bis zum 25.02.2027 gültig.
-4. Der HTTPS-Entrypoint und der Ingress `nginx-https` aus PR #9 sind angewendet.
-   Am 27.11.2026 lieferten lokales HTTPS über Traefik und öffentliches HTTPS
-   über Cloudflare jeweils HTTP/2 200 mit der Nginx-Startseite und ohne
-   Zertifikatsfehler. OpenSSL bestätigte die Zertifikatskette und den Hostnamen;
-   ein absichtlich falscher Prüfhostname wurde abgewiesen. Die bisherige
-   lokale HTTP-Route lieferte weiterhin HTTP 200. Nginx war mit zwei Replikas
-   bereit, Traefik und cloudflared jeweils mit einer. Beide Issuer und beide
-   Certificates waren `Ready`.
-5. `feat/cloudflare-origin-tls` bereitet ausschließlich die Tunnelroute auf
-   `https://traefik.web.svc.cluster.local:443` vor. Im
-   [Cloudflare-Provider 5.29.0](https://github.com/cloudflare/terraform-provider-cloudflare/blob/v5.29.0/docs/resources/zero_trust_tunnel_cloudflared_config.md)
-   heißt der Block `origin_request`. `origin_server_name` übernimmt
-   `lab.motion1.de` aus dem HTTPS-Ingress und stellt damit auch die
-   Terraform-Abhängigkeit zu diesem Ingress her. `no_tls_verify = false`
-   lässt die Prüfung von Zertifikatskette, Gültigkeit und Hostname aktiv;
-   das öffentliche Let's-Encrypt-Zertifikat benötigt keinen eigenen CA-Pool.
-   Siehe [Cloudflare-Origin-Parameter](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/origin-parameters/#tls-settings).
-   Initialisierung mit unveränderter Lockdatei, Formatprüfung und Validierung
-   waren erfolgreich. Provider-Schema und Terraform-Abhängigkeitsgraph wurden
-   ebenfalls geprüft. Alle anderen Terraform-Ressourcen sind unverändert.
-   Der authentifizierte Plan im vorbereiteten Terminal soll ausschließlich
-   `cloudflare_zero_trust_tunnel_cloudflared_config.lab` aktualisieren
-   (`0 to add, 1 to change, 0 to destroy`). Er wurde hier mangels der separaten
-   Cloudflare-Umgebung nicht ausgeführt. Merge und Apply stehen noch aus;
-   anschließend den öffentlichen HTTPS-Test wiederholen und die
-   Tunnel-Verbindung prüfen. Erst dann ist der Origin-HTTPS-Schritt abgeschlossen.
-
-Der HTTP-Entrypoint auf Port 80 und der HTTP-Ingress `nginx` bleiben unverändert
-als Rückfallweg erhalten. Ein Rückwechsel erfolgt bewusst über Terraform:
-die Tunnel-`service`-URL wieder auf `http://traefik.web.svc.cluster.local:80`
-setzen und `origin_request` entfernen, dann den Plan prüfen und das Apply
-freigeben. Bei einem TLS-Fehler gibt es keinen automatischen Rückfall auf HTTP.
-
-Für den authentifizierten App-Plan im vorbereiteten Terminal zusätzlich
-zu den [Cloudflare-Variablen für den Tunnel](#cloudflare-tunnel) setzen:
-
-| Variable | Zweck |
-|---|---|
-| `TF_VAR_cloudflare_dns01_api_token` | Separater Cloudflare-Token mit `Zone Read` und `DNS Edit` nur für `motion1.de` |
-| `TF_VAR_acme_email` | Kontaktadresse für das ACME-Konto |
-
-Den DNS-01-Token beim Plan und beim späteren Apply über die Umgebung setzen.
-`ephemeral` und `data_wo` halten ihn aus Terraform-State und gespeicherten
-Plänen heraus. Für den Plan weiterhin einen geschützten Speicherort und
-Modus `0600` verwenden, da andere Werte darin sensibel sein können.
-Beim Drehen des DNS-01-Tokens `data_wo_revision` erhöhen.
-
-Die Zustände des Production-Issuers und des Certificates lassen sich so prüfen:
-
-```sh
-kubectl_lab="${XDG_CACHE_HOME:-$HOME/.cache}/kubernetes-ai-iac/kubectl/v1.35.8/kubectl"
-"$kubectl_lab" --kubeconfig=cluster/kubeconfig -n web wait --for=condition=Ready issuer/letsencrypt-production --timeout=120s
-"$kubectl_lab" --kubeconfig=cluster/kubeconfig -n web wait --for=condition=Ready certificate/lab-motion1-de-production --timeout=300s
-```
-
-### Lokaler HTTPS-Test für Traefik
-
-Terraform aktiviert zusätzlich `websecure` auf dem internen Traefik-Service
-an Port 443. `web` bleibt der Standard-Entrypoint für die bestehende
-HTTP-Ingress-Regel. Die neue Ingress-Regel `nginx-https` nutzt ausdrücklich
-`websecure`, aktiviert TLS und referenziert `lab-motion1-de-production-tls`.
-PR #9 wurde mit `1 to add, 1 to change, 0 to destroy` geplant und anschließend
-manuell angewendet. Beide Entrypoints sind verfügbar. Der angewendete
-Cloudflare-Tunnel führt bis zur nächsten Freigabe weiterhin auf Port 80.
-
-Im ersten Terminal vom Projektverzeichnis aus:
-
-```sh
-kubectl_lab="${XDG_CACHE_HOME:-$HOME/.cache}/kubernetes-ai-iac/kubectl/v1.35.8/kubectl"
-"$kubectl_lab" --kubeconfig=cluster/kubeconfig -n web rollout status deployment/traefik --timeout=120s
-"$kubectl_lab" --kubeconfig=cluster/kubeconfig -n web port-forward --address=127.0.0.1 svc/traefik 8080:80 8443:443
-```
-
-Im zweiten Terminal HTTPS und die bisherige HTTP-Route prüfen:
-
-```sh
-curl --noproxy '*' --fail --show-error --include --resolve lab.motion1.de:8443:127.0.0.1 https://lab.motion1.de:8443/
-curl --noproxy '*' --fail --show-error --include -H 'Host: lab.motion1.de' http://127.0.0.1:8080/
-```
-
-Beide Aufrufe sollen HTTP 200 und die Nginx-Startseite liefern. `--resolve`
-verbindet direkt zum lokalen Port und erhält den Namen `lab.motion1.de` für
-SNI und Hostname-Prüfung. curl prüft die Zertifikatskette mit dem lokalen
-CA-Speicher. Zusätzlich lässt sich der TLS-Handshake separat prüfen:
-
-```sh
-openssl s_client -connect 127.0.0.1:8443 -servername lab.motion1.de -verify_hostname lab.motion1.de -verify_return_error -CApath /etc/ssl/certs </dev/null
-```
-
-Am 27.11.2026 ergab die Prüfung `Verify return code: 0 (ok)`; curl meldete
-bei lokalem und öffentlichem HTTPS jeweils HTTP/2 200 und TLS-Prüfstatus 0.
-Für den öffentlichen Test `curl --fail --show-error --include https://lab.motion1.de/`
-verwenden. Port-Forwarding mit `Ctrl+C` beenden.
-
-## Lokales Monitoring
-
-`apps/main.tf` verwaltet den Namespace `monitoring` und das Helm-Release
-[`kube-prometheus-stack` 94.1.0](https://github.com/prometheus-community/helm-charts/releases/tag/kube-prometheus-stack-94.1.0).
-Das Chart verlangt Kubernetes ab 1.25 und wurde mit Helm 3.20.2 für Kubernetes
-1.35.8 gerendert. Es bündelt Prometheus, Prometheus Operator, Grafana, Node
-Exporter und kube-state-metrics mit versionierten Images. Alertmanager bleibt
-deaktiviert.
-
-Prometheus hält Metriken 24 Stunden vor. Prometheus und Grafana verwenden
-temporären Speicher. Auf diesem kind-Cluster bleiben die lokalen Metrik-Endpunkte
-von etcd, Controller Manager, Scheduler und kube-proxy unangetastet und werden
-nicht abgefragt.
-
-Am 27.11.2026 erstellte der geprüfte Terraform-Plan zwei Ressourcen. Alle fünf
-Monitoring-Pods waren bereit und liefen ohne Neustarts. Alle sechs Services
-im Namespace `monitoring` und die beiden Scrape-Services in `kube-system`
-hatten bereite Endpunkte. Prometheus meldete 12 von 12 aktiven Zielen als `up`
-und keine Scrape-Fehler. Prometheus und Grafana antworteten über Port-Forwarding
-mit HTTP 200. Grafana konnte die 12 `up`-Zeitreihen aus Prometheus abrufen.
-Nginx antwortete über Traefik weiterhin mit HTTP 200 für `lab.motion1.de`.
-Die Folgepläne für `apps/` und `cluster/` meldeten keine Änderungen.
-
-Auch nach der Tunnel-Bereitstellung waren alle 12 Prometheus-Ziele `up`.
-
-Grafanas Readiness-Prüfung meldete beim Start drei abgelehnte Verbindungen.
-Danach war Grafana bereit. Dem Node Exporter fehlen udev-Zusatzdaten im
-kind-Knoten. Der `diskstats`-Collector lieferte trotzdem Metriken.
-
-Für den lokalen Zugriff vom Projektverzeichnis aus die Variable in jedem
-Terminal setzen und jeweils einen der beiden `port-forward`-Befehle ausführen:
-
-```sh
-kubectl_lab="${XDG_CACHE_HOME:-$HOME/.cache}/kubernetes-ai-iac/kubectl/v1.35.8/kubectl"
-"$kubectl_lab" --kubeconfig=cluster/kubeconfig -n monitoring port-forward --address=127.0.0.1 svc/monitoring-kube-prometheus-prometheus 9090:9090
-"$kubectl_lab" --kubeconfig=cluster/kubeconfig -n monitoring port-forward --address=127.0.0.1 svc/monitoring-grafana 3000:80
-```
-
-Prometheus öffnet sich unter `http://127.0.0.1:9090`, Grafana unter
-`http://127.0.0.1:3000`. Beide Services sind `ClusterIP` und haben keinen
-Ingress. Für die Anmeldung als `admin` lässt sich das vom Chart erzeugte
-Kennwort lokal aus dem Kubernetes-Secret lesen:
-
-```sh
-"$kubectl_lab" --kubeconfig=cluster/kubeconfig -n monitoring get secret monitoring-grafana -o jsonpath='{.data.admin-password}' | base64 --decode
-printf '\n'
-```
-
-Helm installiert die Monitoring-CRDs beim ersten Apply. Beim Entfernen des
-Releases bleiben die CRDs bis zum vollständigen Cluster-Abbau bestehen.
-
-## Kubernetes MCP in VS Code
-
-Codex startet [`containers/kubernetes-mcp-server` 0.1.3](https://github.com/containers/kubernetes-mcp-server/releases/tag/v0.1.3)
-aus `.codex/config.toml` lokal mit `npx` über stdio. Die Server-Konfiguration
-`.codex/kubernetes-mcp.toml` bietet vier lesende Werkzeuge an und sperrt
-Secrets. Ein geerbter Terraform-MCP-Server ist für dieses Projekt deaktiviert.
-
-Terraform verwaltet den ServiceAccount `web/codex-mcp`, eine gemeinsame ClusterRole
-und je ein RoleBinding in `web` und `monitoring`. Die Bindings begrenzen
-`get` und `list` für Pods, Services, Events, Deployments, DaemonSets,
-StatefulSets und Ingresses auf diese zwei Namespaces. Secrets, Pod-Exec,
-Pod-Logs und Änderungen an Workloads sind nicht erlaubt.
-
-Am 27.11.2026 erstellte der geprüfte Plan genau diese vier RBAC-Ressourcen.
-`kubectl auth can-i` bestätigte mit dem ServiceAccount 28 erlaubte und 55
-verbotene Abfragen. Echte MCP-Aufrufe lasen Pods, Deployments und Services in
-`web` und `monitoring`. Secrets und die übrigen fünf Namespaces wurden
-abgewiesen. Eine generische Pod-Liste ohne Namespace verwendet `web` aus dem
-kubeconfig-Kontext. Der Codex-App-Server konnte die Pods in `web` über MCP lesen.
-Die Folgepläne für `apps/` und `cluster/` meldeten keine Änderungen.
-
-Nach der Tunnel-Bereitstellung las Codex über MCP in `web` vier Pods, drei
-Deployments, zwei Services und einen Ingress. Eine Secret-Liste wurde
-abgewiesen.
-
-Eine separate kubeconfig mit kurzlebigem Token liegt lokal vor. Bei Ablauf
-vom Projektverzeichnis aus mit `jq` und dem kubectl aus dem Projektcache
-erneuern. Die Admin-kubeconfig wird nur für diesen manuellen Schritt verwendet.
-Der MCP-Prozess erhält ausschließlich `cluster/kubeconfig.mcp`.
-
-```sh
-(
-  set -euo pipefail
-  umask 077
-  kubectl_lab="${XDG_CACHE_HOME:-$HOME/.cache}/kubernetes-ai-iac/kubectl/v1.35.8/kubectl"
-  lab_admin() {
-    "$kubectl_lab" --kubeconfig=cluster/kubeconfig --context=kind-kubernetes-ai-iac "$@"
-  }
-  connection=$(lab_admin config view --minify --flatten -o 'jsonpath-as-json={.clusters[0].cluster}' |
-    jq -ce '.[0] | {server, "certificate-authority-data"} | select(.server and ."certificate-authority-data")')
-  mcp_tmp=$(mktemp cluster/kubeconfig.mcp.XXXXXX)
-  trap 'rm -- "$mcp_tmp"' EXIT
-  lab_admin -n web create token codex-mcp --duration=1h |
-    jq -Rce --argjson connection "$connection" 'select(length > 0) | {
-      apiVersion: "v1", kind: "Config", "current-context": "codex-mcp",
-      clusters: [{name: "kind-lab", cluster: $connection}],
-      contexts: [{name: "codex-mcp", context: {cluster: "kind-lab", user: "codex-mcp", namespace: "web"}}],
-      users: [{name: "codex-mcp", user: {token: .}}]
-    }' > "$mcp_tmp"
-  mv -- "$mcp_tmp" cluster/kubeconfig.mcp
-  trap - EXIT
-)
-```
-
-Die Datei hat Modus `0600` und wird von Git ignoriert. Das Token gilt eine
-Stunde. In VS Code das Projektverzeichnis als vertrauenswürdigen Workspace
-öffnen und die Codex-Erweiterung neu starten. `codex mcp list` zeigt im
-Projektverzeichnis den lokalen Server `kubernetes` als aktiviert an.
-
-Beispielabfragen im Codex-Chat:
-
-- „Liste über Kubernetes MCP die Pods, Deployments und Services in `web` und
-  `monitoring`. Nutze keine Shell.“
-- „Prüfe ausschließlich über Kubernetes MCP, ob eine Pod-Liste in `kube-system`
-  und eine Secret-Liste in `monitoring` abgewiesen werden. Gib nur das Ergebnis aus.“
+- [x] Remove the old infrastructure and initialize Git.
+- [x] Provision the local Kubernetes cluster with Terraform.
+- [x] Deploy two Nginx replicas, a ClusterIP service and Traefik ingress.
+- [x] Delegate the domain to Cloudflare and manage tunnel + DNS through Terraform.
+- [x] Issue Let's Encrypt staging and production certificates with DNS-01.
+- [x] Enable Traefik HTTPS and fully validated Cloudflare origin TLS.
+- [x] Deploy private Prometheus and Grafana monitoring.
+- [x] Integrate a local Kubernetes MCP server with read-only RBAC.
+- [ ] Add GitHub Actions for code validation.
+- [ ] Verify a complete infrastructure teardown and rebuild.
