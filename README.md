@@ -27,8 +27,8 @@ Das Projekt dient als DevOps-Portfolio und demonstriert KI-gestützte Infrastruc
 - [x] Alte Infrastruktur vollständig entfernen
 - [x] Git-Projekt initialisieren
 - [x] Kubernetes-Cluster mit Terraform bereitstellen
-- [ ] Nginx-Webseite mit Deployment und Service bereitstellen
-- [ ] Traefik installieren
+- [x] Nginx-Webseite mit Deployment und Service bereitstellen
+- [x] Traefik installieren
 - [ ] Cloudflare mit motion1.de verbinden
 - [ ] Tunnel und DNS über Terraform konfigurieren
 - [ ] HTTPS und automatische Zertifikatsverwaltung einrichten
@@ -155,11 +155,15 @@ terraform -chdir=apps validate
 terraform -chdir=apps plan -input=false -detailed-exitcode
 ```
 
-Der Plan sieht fünf neue Terraform-Ressourcen vor. `helm template` mit
-Helm 3.20.2 bestätigt den internen Traefik-Service auf Port 80 und die
-IngressClass `traefik`. Der lokale Funktionstest folgt nach freigegebenem
-Apply. Im ersten Terminal auf die beiden Deployments warten und Traefik an
-den lokalen Port 8080 weiterleiten:
+Am 27.11.2026 erstellte `terraform apply` mit dem geprüften Plan genau fünf
+Ressourcen. Beide Nginx-Pods waren bereit und im Service registriert. Traefik
+lief mit einer bereiten Replika. Beide Services waren `ClusterIP` auf Port 80.
+Der Ingress leitete `lab.motion1.de` an Nginx. Der lokale HTTP-Test lieferte
+Status `200` mit der Nginx-Startseite und `404` für einen anderen Host.
+Die Folgepläne für `apps/` und `cluster/` meldeten keine Änderungen.
+
+Für den lokalen Aufruf im ersten Terminal auf die beiden Deployments warten
+und Traefik an Port 8080 weiterleiten:
 
 ```sh
 kubectl_lab="${XDG_CACHE_HOME:-$HOME/.cache}/kubernetes-ai-iac/kubectl/v1.35.8/kubectl"
@@ -177,3 +181,48 @@ curl -fsS -H 'Host: lab.motion1.de' http://127.0.0.1:8080/ | grep -F 'Welcome to
 Der `Host`-Header wählt die Ingress-Regel aus. Der Aufruf verwendet die lokale
 IP und funktioniert unabhängig vom öffentlichen DNS. Port-Forwarding mit
 `Ctrl+C` beenden.
+
+## Cloudflare DNS
+
+Am 27.11.2026 wurden bei STRATO für `motion1.de` die Cloudflare-Nameserver
+eingetragen. Bei der Prüfung lieferten die `.de`-Zone und öffentliche Resolver
+noch die bisherigen STRATO-Nameserver. Die Cloudflare-Aktivierung steht aus.
+Das lokale Monitoring ist davon unabhängig und wird vorgezogen.
+
+## Lokales Monitoring
+
+`apps/main.tf` plant den Namespace `monitoring` und das Helm-Release
+[`kube-prometheus-stack` 94.1.0](https://github.com/prometheus-community/helm-charts/releases/tag/kube-prometheus-stack-94.1.0).
+Das Chart verlangt Kubernetes ab 1.25 und wurde mit Helm 3.20.2 für Kubernetes
+1.35.8 gerendert. Es bündelt Prometheus, Prometheus Operator, Grafana, Node
+Exporter und kube-state-metrics mit versionierten Images. Alertmanager bleibt
+deaktiviert.
+
+Prometheus hält Metriken 24 Stunden vor. Prometheus und Grafana verwenden
+temporären Speicher. Auf diesem kind-Cluster bleiben die lokalen Metrik-Endpunkte
+von etcd, Controller Manager, Scheduler und kube-proxy unangetastet und werden
+nicht abgefragt. Der App-Plan sieht zwei neue Ressourcen vor und keine
+Änderungen an den bestehenden Ressourcen.
+
+Nach dem freigegebenen Apply sind Prometheus und Grafana per Port-Forwarding
+erreichbar. Vom Projektverzeichnis aus die Variable in jedem Terminal setzen
+und jeweils einen der beiden `port-forward`-Befehle ausführen:
+
+```sh
+kubectl_lab="${XDG_CACHE_HOME:-$HOME/.cache}/kubernetes-ai-iac/kubectl/v1.35.8/kubectl"
+"$kubectl_lab" --kubeconfig=cluster/kubeconfig -n monitoring port-forward --address=127.0.0.1 svc/monitoring-kube-prometheus-prometheus 9090:9090
+"$kubectl_lab" --kubeconfig=cluster/kubeconfig -n monitoring port-forward --address=127.0.0.1 svc/monitoring-grafana 3000:80
+```
+
+Prometheus öffnet sich unter `http://127.0.0.1:9090`, Grafana unter
+`http://127.0.0.1:3000`. Beide Services sind `ClusterIP` und haben keinen
+Ingress. Für die Anmeldung als `admin` lässt sich das vom Chart erzeugte
+Kennwort lokal aus dem Kubernetes-Secret lesen:
+
+```sh
+"$kubectl_lab" --kubeconfig=cluster/kubeconfig -n monitoring get secret monitoring-grafana -o jsonpath='{.data.admin-password}' | base64 --decode
+printf '\n'
+```
+
+Helm installiert die Monitoring-CRDs beim ersten Apply. Beim Entfernen des
+Releases bleiben die CRDs bis zum vollständigen Cluster-Abbau bestehen.
