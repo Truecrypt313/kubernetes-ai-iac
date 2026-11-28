@@ -16,7 +16,7 @@ provider "kubernetes" {
 
 variable "models" {
   type    = set(string)
-  default = ["qwen2.5:0.5b", "qwen2.5:1.5b"]
+  default = ["qwen2.5:0.5b", "qwen2.5:1.5b", "smollm2:135m"]
 }
 
 variable "cpu" {
