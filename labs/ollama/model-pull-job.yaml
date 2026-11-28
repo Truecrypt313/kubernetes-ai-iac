@@ -1,0 +1,21 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pull-qwen-small
+  namespace: ai
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 900
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      containers:
+        - name: model-puller
+          image: ollama/ollama:latest
+          imagePullPolicy: IfNotPresent
+          command: ["ollama", "pull"]
+          args: ["qwen2.5:0.5b"]
+          env:
+            - name: OLLAMA_HOST
+              value: "http://ollama.ai.svc.cluster.local:11434"
