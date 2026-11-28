@@ -551,11 +551,12 @@ not performance benchmarks or availability guarantees.
 
 ## Ollama und optionale NVIDIA-GPU-Integration
 
-Stand 28.11.2026: Ollama läuft auf CPU im Namespace `ai`. Die GPU-Konfiguration
-ist vorbereitet und lokal validiert, aber noch nicht angewendet. Die GPU wird
-noch nicht als Kubernetes-Ressource gemeldet. Die folgenden Eingriffe und Tests
-benötigen vor ihrer Ausführung eine Freigabe; erfolgreiche GPU-Tests werden
-erst nach tatsächlicher Prüfung dokumentiert.
+Stand 28.11.2026: Ollama läuft weiterhin auf CPU im Namespace `ai`. Der
+freigegebene erste Node-Bootstrap wurde ausgeführt und der NVIDIA-Helm-Release
+angelegt. Der Plugin-Pod findet NVML jedoch nicht und meldet noch keine GPU an
+Kubernetes. Die Ursache und die lokal vorbereitete Korrektur stehen unten.
+Weitere Node-Änderungen wurden angehalten; CUDA-Test und Ollama-GPU-Apply sind
+noch nicht ausgeführt. Erfolgreiche GPU-Tests werden erst nach Prüfung dokumentiert.
 
 ### Bestand und Architektur
 
@@ -626,7 +627,7 @@ terraform -chdir=ai plan -input=false
 ```
 
 Erst nach Freigabe kopiert `python3 ai/prepare-kind-gpu.py --apply` die Dateien
-nach `/usr/local/lib`, `/usr/local/bin` beziehungsweise den CDI-Hook nach
+nach `/usr/lib/x86_64-linux-gnu`, `/usr/local/bin` beziehungsweise den CDI-Hook nach
 `/usr/bin` im **vorhandenen kind-Node** und führt dort `ldconfig` aus. Der Host-
 Treiber wird nicht geändert. Danach erzeugt der offizielle Device Plugin die
 zu diesem Node passende CDI-Spezifikation. Das Skript hält diese Vorbereitung
@@ -650,7 +651,6 @@ lokal, von Git ausgeschlossen und im Modus `0600`.
 set +x
 umask 077
 kubectl_lab="${XDG_CACHE_HOME:-$HOME/.cache}/kubernetes-ai-iac/kubectl/v1.35.8/kubectl"
-export TF_VAR_enable_gpu=true
 gpu_plan_dir=$(mktemp -d "${TMPDIR:-/tmp}/kubernetes-ai-gpu-plan.XXXXXXXX")
 
 # Nach Freigabe: Node vorbereiten, dann nur den Plugin-Bootstrap planen.
@@ -680,10 +680,43 @@ terraform -chdir=ai plan -input=false -detailed-exitcode
 `-target` ist hier eine einmalige Bootstrap-Ausnahme für die Hardwareprüfung;
 danach immer einen vollständigen Plan verwenden. Die vorab gespeicherte
 GPU-Vorschau darf nach dem ersten Apply nicht wiederverwendet werden: Der State
-hat sich geändert. Die aktivierte Umgebung benötigt weiterhin
-`TF_VAR_enable_gpu=true` beim Planen; ohne diese Einstellung ist der gewünschte
-Standardbetrieb CPU und Terraform würde den Plugin wieder entfernen. Auch ein
-Rückwechsel auf CPU erfordert einen geprüften Plan und eine Freigabe.
+hat sich geändert. Der gewünschte GPU-Betrieb ist inzwischen dauerhaft in der
+lokalen Datei `ai/gpu.auto.tfvars` hinterlegt:
+
+```hcl
+enable_gpu = true
+```
+
+Terraform lädt sie bei normalen Befehlen mit `-chdir=ai` automatisch. Die Datei
+hat Modus `0600`, ist durch `*.tfvars` von Git ausgeschlossen und enthält keine
+Zugangsdaten. Auf einem neuen Checkout bleibt der Standard CPU; die lokale
+GPU-Einstellung muss dort bewusst angelegt werden. Auch ein Rückwechsel auf CPU
+erfordert einen geprüften Plan und eine Freigabe. Während der angehaltenen
+Aktivierung steht erwartungsgemäß noch Ollamas GPU-Aktualisierung im Plan aus.
+
+### Angehaltener Aktivierungsversuch: NVML-Suchpfad
+
+Der erste freigegebene Bootstrap hat neun Treiber-/Hook-Dateien in den Node
+kopiert und `ldconfig` ausgeführt. `nvidia-smi` funktioniert weiterhin im Node.
+Der gezielte Terraform-Apply meldete exakt `1 added, 0 changed, 0 destroyed`.
+Die erfolgreiche Anlage des Helm-Releases war jedoch kein Nachweis für einen
+funktionsfähigen Device Plugin: Sein Container beendet sich mit
+`CDI --device-list-strategy options are only supported on NVML-based systems`
+und startet im Backoff erneut.
+
+Ursache im ursprünglichen Bootstrap: Die Treiberbibliotheken wurden unter
+`/usr/local/lib` abgelegt. Die NVML-Suche des Plugins berücksichtigt beim
+eingebundenen Driver-Root nur vordefinierte Systembibliotheksverzeichnisse,
+darunter `/usr/lib/x86_64-linux-gnu`, nicht `/usr/local/lib`.
+Siehe [NVIDIAs NVML-Pfadauflösung](https://github.com/NVIDIA/go-nvlib/blob/v0.10.0/pkg/nvlib/info/root.go).
+Die lokale Ein-Zeilen-Korrektur im Skript verwendet deshalb das Systemverzeichnis.
+Sie ist bisher nur als Vorschau geprüft; für das zusätzliche Schreiben in
+diesen Node-Pfad wurde eine gezielte Freigabe angefragt.
+
+Es wurden keine weiteren Infrastrukturänderungen durchgeführt, kein CUDA-
+Test-Pod erstellt und kein Ollama-Neustart ausgelöst. Modellnamen und Digests
+sowie PVC-/PV-Identitäten sind gegenüber dem gesicherten Vorher-Zustand gleich.
+Der PVC ist weiter `Bound`. Der GPU-Meilenstein bleibt offen.
 
 ### Verifizierte Ergebnisse und ausstehende GPU-Tests
 
@@ -695,12 +728,14 @@ Rückwechsel auf CPU erfordert einen geprüften Plan und eine Freigabe.
 | Modelle / Datenträger | Alle drei Modelle verfügbar; PVC `Bound`; alle drei Pull-Jobs erfolgreich |
 | Terraform init / fmt / validate | Erfolgreich; Helm 3.3.0 in der AI-Lockdatei ergänzt |
 | CPU-Plan | Keine Änderungen |
-| Plugin-Bootstrap-Plan | Genau ein neuer Helm-Release |
+| Plugin-Bootstrap-Apply | Genau ein Helm-Release angelegt; Plugin-Pod wegen NVML-Suchpfad nicht bereit |
 | Vollständige GPU-Vorschau | Genau ein Helm-Release neu und Ollama aktualisiert; keine Löschungen |
+| Aktueller AI-Plan nach Plugin-Apply | Nur Ollamas noch ausstehende GPU-Aktualisierung; keine weiteren Änderungen |
 | Cluster-Plan | Keine Änderungen, kein Neuaufbau |
+| Plattform-Konfiguration `apps/` | Validierung erfolgreich; vollständiger Plan mangels separater Cloudflare-Umgebungsvariablen hier nicht ausführbar |
 | Helm-Rendering / Bootstrap-Vorschau | Erfolgreich, keine Node-Änderung ausgeführt |
 | Bestehende Plattform | Öffentliche Webseite HTTP/2 200 mit gültigem TLS; Grafana HTTP 200 und Datenbank `ok`; 12/12 Prometheus-Ziele `up` |
-| GPU-Test-Pod / GPU-Inferenz / Folgeplan | Ausstehend bis zur Freigabe und Ausführung |
+| GPU-Test-Pod / GPU-Inferenz / Folgeplan | Angehalten bis zur zusätzlichen Pfadkorrektur und deren Prüfung |
 
 CPU-Referenz für den späteren direkten Vergleich: `qwen2.5:1.5b`, Digest
 `65ec06548149b04c096a120e4a6da9d4017ea809c91734ea5631e89f96ddc57b`,

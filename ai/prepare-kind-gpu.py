@@ -38,7 +38,7 @@ spec = json.loads(output("nvidia-ctk", "--quiet", "cdi", "generate", "--format=j
 edits = [spec.get("containerEdits", {})] + [d.get("containerEdits", {}) for d in spec["devices"]]
 prefixes = ("libcuda.", "libcudadebugger.", "libnvidia-ml.", "libnvidia-ptxjitcompiler.", "libnvidia-nvvm", "libnvidia-gpucomp.")
 files = {
-    Path(m["hostPath"]): "usr/local/lib/" + Path(m["hostPath"]).name
+    Path(m["hostPath"]): "usr/lib/x86_64-linux-gnu/" + Path(m["hostPath"]).name
     for edit in edits for m in edit.get("mounts", [])
     if Path(m["hostPath"]).name.startswith(prefixes) and Path(m["hostPath"]).is_file()
 }
