@@ -29,7 +29,7 @@ A DevOps portfolio project that turns a local Kubernetes cluster into a public H
 | Certificate lifecycle | cert-manager with separate Let's Encrypt staging and production issuers, DNS-01 validation and a production TLS certificate. |
 | Observability | Prometheus Operator, Prometheus, Grafana, Node Exporter and kube-state-metrics, accessed privately through local port forwarding. |
 | AI-assisted operations | Codex in VS Code uses a local Kubernetes MCP server to inspect approved resources in `web` and `monitoring`. |
-| Local AI inference | Private Ollama service with persistent models and automated pull jobs; optional NVIDIA GPU support is prepared and awaits runtime validation. |
+| Local AI inference | Private Ollama service with persistent models, automated pull jobs and verified NVIDIA GPU inference through CDI. |
 
 **Recorded verification — 27 November 2026:** public and local HTTPS returned HTTP/2 200 with valid certificates; both Nginx replicas were ready; Prometheus reported 12/12 scrape targets up. These are documented test results, not uptime or performance guarantees. [Validation records and commands →](docs/deployment.md#cloudflare-tunnel)
 
@@ -43,7 +43,7 @@ Cloudflare terminates browser TLS. Inside the cluster, cloudflared connects to `
 
 cert-manager uses Cloudflare DNS-01 validation with separate staging and production issuers. The monitoring stack has no public Ingress. Kubernetes MCP runs locally over stdio, using a separate ServiceAccount and kubeconfig.
 
-The `ai` namespace adds a private Ollama ClusterIP service and a protected model PVC. It currently runs on CPU. Optional GPU support connects the host NVIDIA driver to kind's containerd through CDI and the official NVIDIA Device Plugin; its activation requires approval. [AI installation, plans and test status →](docs/deployment.md#ollama-und-optionale-nvidia-gpu-integration)
+The `ai` namespace adds a private Ollama ClusterIP service and a protected model PVC. The RTX 3060 is allocated through containerd CDI and the official NVIDIA Device Plugin. All three existing models have passed GPU inference checks. A matched warm benchmark of `qwen2.5:1.5b` measured **24.25 tokens/s on CPU and 174.33 tokens/s on GPU (7.19×)**; the first GPU warm-up took about 69 seconds and is excluded from that comparison. [AI installation, measurements and limitations →](docs/deployment.md#ollama-und-optionale-nvidia-gpu-integration)
 
 ## AI-assisted infrastructure workflow
 
@@ -140,7 +140,7 @@ For exact versions, required environment variables, installation ordering, port-
 - [x] Deploy private Prometheus and Grafana monitoring.
 - [x] Integrate a local Kubernetes MCP server with read-only RBAC.
 - [x] Provision private Ollama inference and three persistent models with Terraform.
-- [ ] Validate NVIDIA CDI, GPU allocation and Ollama GPU inference (implementation prepared).
+- [x] Validate NVIDIA CDI, GPU allocation and Ollama GPU inference.
 - [ ] Build a Kubernetes operator in Go for model management after GPU integration.
 - [ ] Add GitHub Actions for code validation.
 - [ ] Verify a complete infrastructure teardown and rebuild.

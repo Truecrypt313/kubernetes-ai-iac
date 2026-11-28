@@ -551,12 +551,12 @@ not performance benchmarks or availability guarantees.
 
 ## Ollama und optionale NVIDIA-GPU-Integration
 
-Stand 28.11.2026: Ollama läuft weiterhin auf CPU im Namespace `ai`. Der
-freigegebene erste Node-Bootstrap wurde ausgeführt und der NVIDIA-Helm-Release
-angelegt. Der Plugin-Pod findet NVML jedoch nicht und meldet noch keine GPU an
-Kubernetes. Die Ursache und die lokal vorbereitete Korrektur stehen unten.
-Weitere Node-Änderungen wurden angehalten; CUDA-Test und Ollama-GPU-Apply sind
-noch nicht ausgeführt. Erfolgreiche GPU-Tests werden erst nach Prüfung dokumentiert.
+Stand 28.11.2026: Die freigegebene GPU-Integration ist angewendet und getestet.
+Kubernetes meldet eine NVIDIA-GPU; ein regulärer CUDA-Test-Pod hat erfolgreich
+einen Kernel ausgeführt und wurde danach entfernt. Ollama läuft im Namespace
+`ai` auf der GPU, alle drei bestehenden Modelle funktionieren weiterhin.
+Der bestehende Cluster, PVC und Modellbestand wurden erhalten. Die anfängliche
+NVML-Suchpfadkorrektur ist unten mit Ursache und Ergebnis dokumentiert.
 
 ### Bestand und Architektur
 
@@ -691,10 +691,11 @@ Terraform lädt sie bei normalen Befehlen mit `-chdir=ai` automatisch. Die Datei
 hat Modus `0600`, ist durch `*.tfvars` von Git ausgeschlossen und enthält keine
 Zugangsdaten. Auf einem neuen Checkout bleibt der Standard CPU; die lokale
 GPU-Einstellung muss dort bewusst angelegt werden. Auch ein Rückwechsel auf CPU
-erfordert einen geprüften Plan und eine Freigabe. Während der angehaltenen
-Aktivierung steht erwartungsgemäß noch Ollamas GPU-Aktualisierung im Plan aus.
+erfordert einen geprüften Plan und eine Freigabe. Der abschließende vollständige
+AI-Plan hat die lokale Einstellung ohne CLI-Variablen geladen und keine
+Änderungen gemeldet.
 
-### Angehaltener Aktivierungsversuch: NVML-Suchpfad
+### Behobener Startfehler: NVML-Suchpfad
 
 Der erste freigegebene Bootstrap hat neun Treiber-/Hook-Dateien in den Node
 kopiert und `ldconfig` ausgeführt. `nvidia-smi` funktioniert weiterhin im Node.
@@ -709,35 +710,47 @@ Ursache im ursprünglichen Bootstrap: Die Treiberbibliotheken wurden unter
 eingebundenen Driver-Root nur vordefinierte Systembibliotheksverzeichnisse,
 darunter `/usr/lib/x86_64-linux-gnu`, nicht `/usr/local/lib`.
 Siehe [NVIDIAs NVML-Pfadauflösung](https://github.com/NVIDIA/go-nvlib/blob/v0.10.0/pkg/nvlib/info/root.go).
-Die lokale Ein-Zeilen-Korrektur im Skript verwendet deshalb das Systemverzeichnis.
-Sie ist bisher nur als Vorschau geprüft; für das zusätzliche Schreiben in
-diesen Node-Pfad wurde eine gezielte Freigabe angefragt.
+Die Ein-Zeilen-Korrektur im Skript verwendet deshalb das Systemverzeichnis.
+Nach zusätzlicher Freigabe wurden dieselben Bibliotheken dort bereitgestellt
+und `ldconfig` ausgeführt. Der nächste automatische Container-Start war
+erfolgreich. Für die Plugin-Reparatur war kein expliziter Pod-, Docker-,
+containerd- oder Cluster-Neustart erforderlich. Die acht Neustarts des Plugin-Containers stammen aus
+der anfänglichen Fehlersuche; nach der Korrektur blieb er stabil und bereit.
 
-Es wurden keine weiteren Infrastrukturänderungen durchgeführt, kein CUDA-
-Test-Pod erstellt und kein Ollama-Neustart ausgelöst. Modellnamen und Digests
-sowie PVC-/PV-Identitäten sind gegenüber dem gesicherten Vorher-Zustand gleich.
-Der PVC ist weiter `Bound`. Der GPU-Meilenstein bleibt offen.
+Der Plugin hat `/var/run/cdi/k8s.device-plugin.nvidia.com-gpu.json` mit CDI-Schema
+0.7.0 und genau einem Gerät erzeugt. kubelet meldet `nvidia.com/gpu: 1` als
+Capacity und Allocatable. Der freigegebene vollständige AI-Apply änderte danach
+ausschließlich das Ollama-Deployment (`0 added, 1 changed, 0 destroyed`).
+Die erwartete Ollama-Pod-Erneuerung dauerte beim Apply etwa 16 Sekunden.
 
-### Verifizierte Ergebnisse und ausstehende GPU-Tests
+Der CDI-Generator protokolliert Hinweise auf nicht vorhandene optionale
+Grafik-/Vulkan-Dateien sowie leere GDRCopy-/GDS-Spezifikationen. Diese Funktionen
+werden nicht installiert oder verwendet. CUDA-Test und Ollama-Inferenz sind
+unabhängig davon erfolgreich; die GPU-Spezifikation selbst ist gültig.
+
+### Verifizierte Ergebnisse nach Aktivierung
 
 | Prüfung am 28.11.2026 | Ergebnis |
 |---|---|
 | Host und kind-Node | `nvidia-smi` erkennt RTX 3060 und Treiber 580.178.04 |
 | containerd | 2.3.4, CDI aktiv, Suchpfade `/etc/cdi` und `/var/run/cdi` |
-| Aktueller Kubernetes-Stand | Keine GPU-Ressource, Node `Ready`; alle laufenden Anwendungs-Pods bereit |
+| Aktueller Kubernetes-Stand | Eine GPU, Node `Ready`, keine Node-Pressure; alle 23 laufenden Pods bereit, drei Model-Pull-Pods abgeschlossen |
 | Modelle / Datenträger | Alle drei Modelle verfügbar; PVC `Bound`; alle drei Pull-Jobs erfolgreich |
 | Terraform init / fmt / validate | Erfolgreich; Helm 3.3.0 in der AI-Lockdatei ergänzt |
-| CPU-Plan | Keine Änderungen |
-| Plugin-Bootstrap-Apply | Genau ein Helm-Release angelegt; Plugin-Pod wegen NVML-Suchpfad nicht bereit |
+| CPU-Plan vor Aktivierung | Keine Änderungen |
+| Plugin-Bootstrap-Apply | Genau ein Helm-Release angelegt; Plugin nach Pfadkorrektur bereit |
 | Vollständige GPU-Vorschau | Genau ein Helm-Release neu und Ollama aktualisiert; keine Löschungen |
-| Aktueller AI-Plan nach Plugin-Apply | Nur Ollamas noch ausstehende GPU-Aktualisierung; keine weiteren Änderungen |
+| Ollama-GPU-Apply | Nur das bestehende Deployment aktualisiert; keine weiteren Änderungen oder Löschungen |
+| Abschließender AI-Plan | Exitcode 0, keine Änderungen; lokale GPU-Einstellung automatisch geladen |
 | Cluster-Plan | Keine Änderungen, kein Neuaufbau |
 | Plattform-Konfiguration `apps/` | Validierung erfolgreich; vollständiger Plan mangels separater Cloudflare-Umgebungsvariablen hier nicht ausführbar |
-| Helm-Rendering / Bootstrap-Vorschau | Erfolgreich, keine Node-Änderung ausgeführt |
+| Helm-Rendering / Node-Bootstrap | Erfolgreich; neun Treiber-/Hook-Dateien im bestehenden Node bereitgestellt |
 | Bestehende Plattform | Öffentliche Webseite HTTP/2 200 mit gültigem TLS; Grafana HTTP 200 und Datenbank `ok`; 12/12 Prometheus-Ziele `up` |
-| GPU-Test-Pod / GPU-Inferenz / Folgeplan | Angehalten bis zur zusätzlichen Pfadkorrektur und deren Prüfung |
+| CUDA-Test-Pod | Unprivilegiert, genau eine GPU; VectorAdd für 50.000 Elemente meldet `Test PASSED`, Exitcode 0; Pod anschließend entfernt |
+| Ollama-GPU-Inferenz | Alle drei Modelle erfolgreich; GPU-Speicherbelegung über `/api/ps` bestätigt |
+| Bestandsschutz | Modell-Digests, PVC-/PV- und Node-Identitäten unverändert; bestehende Plattform-Pods ohne zusätzliche Neustarts |
 
-CPU-Referenz für den späteren direkten Vergleich: `qwen2.5:1.5b`, Digest
+Erste CPU-Referenz während der Vorbereitung: `qwen2.5:1.5b`, Digest
 `65ec06548149b04c096a120e4a6da9d4017ea809c91734ea5631e89f96ddc57b`,
 Q4_K_M, identisches Ollama-Image, vier CPU-Threads, Kontext 2048, Seed 42,
 Temperatur 0, 128 Ausgabetokens, ein Warm-up und drei Messungen. Prompt:
@@ -752,12 +765,12 @@ Temperatur 0, 128 Ausgabetokens, ein Warm-up und drei Messungen. Prompt:
 
 Berechnung aus Ollamas API: `eval_count / eval_duration * 1e9`. Modell-Ladezeit
 und Prompt-Auswertung sind darin nicht enthalten. `/api/ps` bestätigte beim
-CPU-Lauf `size_vram = 0`. Die GPU-Messung muss dieselbe Anfrage, Modell-Digest,
-Threadzahl und Ressourcenlimits verwenden, wieder mit Warm-up und drei Läufen.
-Für den Nachweis zusätzlich `/api/ps` (`size_vram > 0`), `ollama ps`, die Ollama-
-Logs und GPU-Speicher/Prozesse über `nvidia-smi` prüfen. Ein sichtbares Gerät oder
-eine schnelle Antwort allein beweist keine GPU-Inferenz. Die API wird dafür
-ausschließlich lokal weitergeleitet:
+CPU-Lauf `size_vram = 0`. Die folgende aktuelle Vergleichsmessung wurde während
+der Aktivierung mit einer frischen CPU-Referenz und denselben Bedingungen für
+die GPU durchgeführt. Für den Nachweis wurden zusätzlich `/api/ps`, `ollama ps`,
+die Ollama-Logs und GPU-Speicher/Prozesse über `nvidia-smi` geprüft. Ein sichtbares
+Gerät oder eine schnelle Antwort allein beweist keine GPU-Inferenz. Die API
+wurde dafür ausschließlich lokal weitergeleitet:
 
 ```sh
 "$kubectl_lab" --kubeconfig=cluster/kubeconfig -n ai port-forward --address=127.0.0.1 svc/ollama 11434:11434
@@ -777,6 +790,47 @@ vergleichen. Der Host nutzt die GPU auch für die grafische Oberfläche;
 Hintergrundlast kann Benchmarks beeinflussen. Kein Leistungsversprechen aus
 einzelnen Lab-Messungen ableiten.
 
+### CPU-/GPU-Vergleich während der Aktivierung
+
+Beide Reihen verwenden exakt den obigen JSON-Request, dieselbe Ollama-Version
+0.40.19, dasselbe Image, denselben Modell-Digest, vier CPU-Threads, Kontext 2048,
+Seed 42, Temperatur 0 und dieselben Limits von vier CPUs und 4 GiB RAM. Nach je
+einem Warm-up folgen drei Messungen mit jeweils 128 generierten Tokens.
+Begleitend wird in beiden Reihen mit demselben Abtastintervall `nvidia-smi`
+abgefragt. Die zusätzliche GPU-Anforderung ist der einzige Deployment-Unterschied.
+
+| Messlauf | CPU Tokens/s | GPU Tokens/s |
+|---|---:|---:|
+| 1 | 24.25 | 176.40 |
+| 2 | 23.55 | 173.62 |
+| 3 | 24.72 | 174.33 |
+| Median | **24.25** | **174.33** |
+
+Das Verhältnis der ungerundeten Mediane beträgt **7,19×**. Verglichen wird
+ausschließlich die warme Token-Generierung aus `eval_count / eval_duration`,
+nicht die End-to-End-Latenz. Der erste CPU-Warm-up dauerte insgesamt 6,99 s,
+der erste GPU-Warm-up 69,28 s. Beide sind vom Median ausgeschlossen. Die lange
+erste GPU-Anfrage gehört zum beobachteten Lade-/Initialisierungsaufwand und
+darf beim Bewerten interaktiver Nutzung nicht unterschlagen werden.
+
+GPU-Nachweise für `qwen2.5:1.5b`:
+
+- Logs: `offloaded 29/29 layers to GPU`, Modell- und KV-Puffer auf `CUDA0`.
+- `ollama ps`: `100% GPU`, Kontext 2048. Das bezeichnet die Modellplatzierung,
+  nicht die Auslastungsanzeige der GPU.
+- `/api/ps`: `size_vram = 1108565032` Bytes, etwa 1.057 MiB; CPU-Reihe: 0 Bytes.
+- `nvidia-smi`: `/usr/lib/ollama/llama-server` mit 1.186 MiB GPU-Speicher.
+- Zehn Samples während der drei GPU-Messläufe: GPU-Auslastung bis 95 %, Median
+  95 %. Das sind hostweite Werte einschließlich der grafischen Oberfläche;
+  bereits während der CPU-Reihe lag deren Median bei 22 %. Die Zuordnung zur
+  Inferenz stützt sich daher zusätzlich auf Prozess, VRAM und CUDA-Offload.
+
+Zusätzliche kurze Inferenztests bestätigten GPU-VRAM für alle vorhandenen
+Modelle: `qwen2.5:0.5b` 456.382.217 Bytes, `smollm2:135m` 332.545.391 Bytes und
+`qwen2.5:1.5b` 1.108.565.032 Bytes. Die Modell-Digests blieben gegenüber dem
+gesicherten Vorher-Zustand unverändert. Es wurde kein Modell gelöscht oder neu
+gezogen. Ollama bleibt unprivilegiert und ausschließlich als ClusterIP erreichbar.
+
 ### Grenzen und nächster Meilenstein
 
 Der Host-Treiber und Toolkit bleiben Voraussetzungen; das Skript pinnt den
@@ -790,6 +844,6 @@ noch nicht getestet und wird im bestehenden Cluster nicht erzwungen.
 Cloudflare, Traefik, Monitoring und MCP-RBAC bleiben unverändert. MCP erhält
 keine zusätzlichen Rechte für `ai`. Die bestehenden Architektur-Grafiken zeigen
 weiterhin die Web-Plattform; die AI-/GPU-Erweiterung ist oben separat beschrieben.
-Nach nachgewiesener GPU-Zuweisung und GPU-Inferenz folgt ein eigener Kubernetes-
-Operator in Go zur automatisierten Modellverwaltung. Dieser Operator ist hier
-noch nicht implementiert.
+Die GPU-Zuweisung und GPU-Inferenz sind jetzt nachgewiesen. Als nächster
+Meilenstein folgt ein eigener Kubernetes-Operator in Go zur automatisierten
+Modellverwaltung. Dieser Operator ist hier noch nicht implementiert.
