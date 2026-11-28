@@ -548,3 +548,319 @@ Docker network address; other visible identifiers are lab resource names and
 the public project domain. Image metadata contains only DPI information. The
 screenshots are retained unchanged and represent captured lab observations,
 not performance benchmarks or availability guarantees.
+
+## Ollama und optionale NVIDIA-GPU-Integration
+
+Stand 28.11.2026: Die freigegebene GPU-Integration ist angewendet und getestet.
+Kubernetes meldet eine NVIDIA-GPU; ein regulärer CUDA-Test-Pod hat erfolgreich
+einen Kernel ausgeführt und wurde danach entfernt. Ollama läuft im Namespace
+`ai` auf der GPU, alle drei bestehenden Modelle funktionieren weiterhin.
+Der bestehende Cluster, PVC und Modellbestand wurden erhalten. Die anfängliche
+NVML-Suchpfadkorrektur ist unten mit Ursache und Ergebnis dokumentiert.
+
+### Bestand und Architektur
+
+`ai/main.tf` verwaltet Namespace, Ollama-Deployment, privaten ClusterIP-Service,
+einen 10-Gi-PVC und drei abgeschlossene Model-Pull-Jobs. `prevent_destroy` schützt
+den PVC. Die Strategie `Recreate` vermeidet zwei gleichzeitig laufende Ollama-
+Replikas mit demselben Datenträger beziehungsweise derselben einzelnen GPU.
+Ein GPU-Wechsel startet ausschließlich Ollama neu und unterbricht seine API kurz.
+Die alten YAML-Dateien in `labs/ollama/` dokumentieren den ursprünglichen CPU-Lab;
+sie nicht parallel zur Terraform-Konfiguration erneut anwenden.
+
+```text
+Host: RTX 3060, NVIDIA-Treiber + Container Toolkit
+  └─ kind-Node: CUDA/NVML-Bibliotheken + nvidia-cdi-hook
+       ├─ NVIDIA Device Plugin → CDI-Spezifikation → containerd / runc
+       └─ Kubernetes nvidia.com/gpu: 1 → Ollama in ai → bestehender Modell-PVC
+```
+
+Der Device Plugin schreibt seine CDI-Spezifikation in `/var/run/cdi` des Nodes
+und meldet die GPU an kubelet. `cdi-cri` übergibt die konkrete Geräteauswahl über
+die CRI-Schnittstelle an containerd. Dafür ist kein zusätzlicher NVIDIA-
+RuntimeClass-Handler nötig. Die vorhandene containerd-Konfiguration aktiviert
+CDI bereits. Treiber, Docker, containerd und Cluster müssen nach aktuellem Befund
+nicht neu gestartet oder neu erstellt werden.
+
+| Komponente | Festgelegter Stand |
+|---|---|
+| GPU / Host-Treiber | RTX 3060, 12 GiB VRAM / 580.178.04 |
+| NVIDIA Container Toolkit | 1.20.2, bereits auf dem Host installiert |
+| Kubernetes / containerd | 1.35.8 / 2.3.4 |
+| Terraform / Provider | 1.17.2 / Kubernetes 3.5.0 und Helm 3.3.0 |
+| NVIDIA Device Plugin | Offizielles Helm-Chart 0.19.2, Image v0.19.2 mit amd64-Digest im Code |
+| CUDA-Test | NVIDIA VectorAdd für CUDA 12.5.0, amd64-Digest im Manifest |
+| Ollama | API-Version 0.40.19; vorhandenes, unverändertes Image per Digest in `ai/main.tf` |
+
+Das NVIDIA-Chart erlaubt Kubernetes ab 1.10; Plugin 0.19.2 verwendet Kubernetes-
+Bibliotheken 0.35.5 und passt damit zur vorhandenen 1.35-Version. GFD und NFD
+sind deaktiviert. Ein fester Node-Selector ersetzt die sonst vom Chart erwarteten
+GPU-Erkennungslabels. `affinity: null` entfernt die voreingestellte Affinität;
+ein leeres Objekt würde die Helm-Vorgaben nicht zuverlässig entfernen.
+Das offizielle Chart legt außerdem ein MPS-Control-DaemonSet an. Mangels
+`nvidia.com/mps.capable=true` bleibt dieses ohne Pod. MPS und GPU-Sharing werden
+nicht aktiviert.
+
+Quellen: [Device Plugin 0.19.2](https://github.com/NVIDIA/k8s-device-plugin/tree/v0.19.2),
+[Chart-Werte](https://github.com/NVIDIA/k8s-device-plugin/blob/v0.19.2/deployments/helm/nvidia-device-plugin/values.yaml),
+[CDI im Toolkit 1.20.2](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/1.20.2/cdi-support.html),
+[Kubernetes Device Plugins](https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/device-plugins/),
+[Ollama GPU-Unterstützung](https://docs.ollama.com/gpu).
+
+### Reproduzierbare Vorbereitung des vorhandenen Nodes
+
+`ai/prepare-kind-gpu.py` benötigt nur Python-Standardbibliothek, Docker und die
+bereits installierten NVIDIA-Werkzeuge. Es prüft Clustername, Treiber- und
+Toolkit-Version, vorhandene NVIDIA-Gerätedateien und aktives CDI. NVIDIA liefert
+das Dateiinventar; daraus werden ausschließlich CUDA-/NVML-Bibliotheken,
+`nvidia-smi` und `nvidia-cdi-hook` übernommen. Die Vorschau wählt hier neun Dateien
+mit zusammen etwa 317 MiB. Sie kopiert keine Grafikbibliotheken, Sockets,
+Kubeconfigs oder Modellinhalte.
+
+```sh
+# Nur Diagnose/Vorschau, keine Node-Änderung:
+python3 ai/prepare-kind-gpu.py
+terraform -chdir=ai init -input=false -lockfile=readonly
+terraform -chdir=ai fmt -check
+terraform -chdir=ai validate
+terraform -chdir=ai plan -input=false
+```
+
+Erst nach Freigabe kopiert `python3 ai/prepare-kind-gpu.py --apply` die Dateien
+nach `/usr/lib/x86_64-linux-gnu`, `/usr/local/bin` beziehungsweise den CDI-Hook nach
+`/usr/bin` im **vorhandenen kind-Node** und führt dort `ldconfig` aus. Der Host-
+Treiber wird nicht geändert. Danach erzeugt der offizielle Device Plugin die
+zu diesem Node passende CDI-Spezifikation. Das Skript hält diese Vorbereitung
+bewusst außerhalb von `cluster/main.tf`, damit kein Cluster-Ersatz ausgelöst wird.
+
+Die Docker-Gruppe erlaubt weitreichende Node-Zugriffe; das Skript nur aus einem
+geprüften Checkout ausführen. Der Device Plugin benötigt privilegierten Zugriff
+auf den GPU-Node und dessen Treiber-Dateisystem. **Ollama und der CUDA-Test-Pod
+werden nicht privilegiert betrieben.** Ihre GPU-Zuweisung erfolgt regulär über
+`nvidia.com/gpu: 1`; Ollamas API bleibt ohne öffentlichen Ingress.
+
+### Gestufte Aktivierung nach Freigabe
+
+Eine einzige GPU kann nicht gleichzeitig exklusiv an Ollama und den Test-Pod
+vergeben werden. Deshalb zuerst den Device Plugin installieren, den separaten
+Test abschließen und erst danach Ollama auf GPU umstellen. Alle Befehle laufen
+vom Repository-Verzeichnis aus. State, Backups und gespeicherte Pläne bleiben
+lokal, von Git ausgeschlossen und im Modus `0600`.
+
+```sh
+set +x
+umask 077
+kubectl_lab="${XDG_CACHE_HOME:-$HOME/.cache}/kubernetes-ai-iac/kubectl/v1.35.8/kubectl"
+gpu_plan_dir=$(mktemp -d "${TMPDIR:-/tmp}/kubernetes-ai-gpu-plan.XXXXXXXX")
+
+# Neuer Checkout: VOR dem ersten GPU-Plan dauerhaft aktivieren.
+# Nur anlegen, wenn noch keine lokale GPU-Konfiguration vorhanden ist.
+if [ ! -e ai/gpu.auto.tfvars ]; then
+  printf 'enable_gpu = true\n' > ai/gpu.auto.tfvars
+fi
+chmod 600 ai/gpu.auto.tfvars
+# Bei vorhandener Datei sicherstellen, dass enable_gpu = true gesetzt ist.
+
+# Nach Freigabe: Node vorbereiten, dann nur den Plugin-Bootstrap planen.
+python3 ai/prepare-kind-gpu.py --apply
+terraform -chdir=ai plan -input=false -target=helm_release.nvidia_device_plugin -out="$gpu_plan_dir/plugin.tfplan"
+# Erwartet: 1 to add, 0 to change, 0 to destroy. Vor Apply prüfen.
+terraform -chdir=ai apply "$gpu_plan_dir/plugin.tfplan"
+
+"$kubectl_lab" --kubeconfig=cluster/kubeconfig -n kube-system rollout status daemonset/nvidia-device-plugin --timeout=180s
+"$kubectl_lab" --kubeconfig=cluster/kubeconfig get node kubernetes-ai-iac-control-plane -o 'jsonpath={.status.capacity.nvidia\.com/gpu}{" / "}{.status.allocatable.nvidia\.com/gpu}{"\n"}'
+
+# Erst nach bestätigter GPU-Ressource: regulärer CUDA-Test-Pod.
+"$kubectl_lab" --kubeconfig=cluster/kubeconfig apply -f labs/ollama/gpu-test-pod.yaml
+"$kubectl_lab" --kubeconfig=cluster/kubeconfig -n ai wait --for=jsonpath='{.status.phase}'=Succeeded pod/gpu-test --timeout=180s
+"$kubectl_lab" --kubeconfig=cluster/kubeconfig -n ai logs gpu-test
+# Erwartet: Test PASSED. Danach ausschließlich diesen Test-Pod entfernen.
+"$kubectl_lab" --kubeconfig=cluster/kubeconfig -n ai delete pod gpu-test
+
+# Frischer vollständiger Plan nach dem Plugin-Bootstrap:
+terraform -chdir=ai plan -input=false -out="$gpu_plan_dir/ollama-gpu.tfplan"
+# Erwartet: 0 to add, 1 to change, 0 to destroy; nur Ollama aktualisieren.
+terraform -chdir=ai apply "$gpu_plan_dir/ollama-gpu.tfplan"
+"$kubectl_lab" --kubeconfig=cluster/kubeconfig -n ai rollout status deployment/ollama --timeout=180s
+terraform -chdir=ai plan -input=false -detailed-exitcode
+```
+
+`-target` ist hier eine einmalige Bootstrap-Ausnahme für die Hardwareprüfung;
+danach immer einen vollständigen Plan verwenden. Die vorab gespeicherte
+GPU-Vorschau darf nach dem ersten Apply nicht wiederverwendet werden: Der State
+hat sich geändert. Der gewünschte GPU-Betrieb ist inzwischen dauerhaft in der
+lokalen Datei `ai/gpu.auto.tfvars` hinterlegt:
+
+```hcl
+enable_gpu = true
+```
+
+Terraform lädt sie bei normalen Befehlen mit `-chdir=ai` automatisch. Die Datei
+hat Modus `0600`, ist durch `*.tfvars` von Git ausgeschlossen und enthält keine
+Zugangsdaten. Auf einem neuen Checkout bleibt der Standard CPU; die lokale
+GPU-Einstellung muss deshalb wie oben gezeigt **vor dem ersten GPU-Terraform-Plan**
+angelegt beziehungsweise auf `true` gesetzt werden. Andernfalls plant Terraform
+den optionalen Plugin-Release nicht. Auch ein Rückwechsel auf CPU
+erfordert einen geprüften Plan und eine Freigabe. Der abschließende vollständige
+AI-Plan hat die lokale Einstellung ohne CLI-Variablen geladen und keine
+Änderungen gemeldet.
+
+### Behobener Startfehler: NVML-Suchpfad
+
+Der erste freigegebene Bootstrap hat neun Treiber-/Hook-Dateien in den Node
+kopiert und `ldconfig` ausgeführt. `nvidia-smi` funktioniert weiterhin im Node.
+Der gezielte Terraform-Apply meldete exakt `1 added, 0 changed, 0 destroyed`.
+Die erfolgreiche Anlage des Helm-Releases war jedoch kein Nachweis für einen
+funktionsfähigen Device Plugin: Sein Container beendet sich mit
+`CDI --device-list-strategy options are only supported on NVML-based systems`
+und startet im Backoff erneut.
+
+Ursache im ursprünglichen Bootstrap: Die Treiberbibliotheken wurden unter
+`/usr/local/lib` abgelegt. Die NVML-Suche des Plugins berücksichtigt beim
+eingebundenen Driver-Root nur vordefinierte Systembibliotheksverzeichnisse,
+darunter `/usr/lib/x86_64-linux-gnu`, nicht `/usr/local/lib`.
+Siehe [NVIDIAs NVML-Pfadauflösung](https://github.com/NVIDIA/go-nvlib/blob/v0.10.0/pkg/nvlib/info/root.go).
+Die Ein-Zeilen-Korrektur im Skript verwendet deshalb das Systemverzeichnis.
+Nach zusätzlicher Freigabe wurden dieselben Bibliotheken dort bereitgestellt
+und `ldconfig` ausgeführt. Der nächste automatische Container-Start war
+erfolgreich. Für die Plugin-Reparatur war kein expliziter Pod-, Docker-,
+containerd- oder Cluster-Neustart erforderlich. Die acht Neustarts des Plugin-Containers stammen aus
+der anfänglichen Fehlersuche; nach der Korrektur blieb er stabil und bereit.
+
+Der Plugin hat `/var/run/cdi/k8s.device-plugin.nvidia.com-gpu.json` mit CDI-Schema
+0.7.0 und genau einem Gerät erzeugt. kubelet meldet `nvidia.com/gpu: 1` als
+Capacity und Allocatable. Der freigegebene vollständige AI-Apply änderte danach
+ausschließlich das Ollama-Deployment (`0 added, 1 changed, 0 destroyed`).
+Die erwartete Ollama-Pod-Erneuerung dauerte beim Apply etwa 16 Sekunden.
+
+Der CDI-Generator protokolliert Hinweise auf nicht vorhandene optionale
+Grafik-/Vulkan-Dateien sowie leere GDRCopy-/GDS-Spezifikationen. Diese Funktionen
+werden nicht installiert oder verwendet. CUDA-Test und Ollama-Inferenz sind
+unabhängig davon erfolgreich; die GPU-Spezifikation selbst ist gültig.
+
+### Verifizierte Ergebnisse nach Aktivierung
+
+| Prüfung am 28.11.2026 | Ergebnis |
+|---|---|
+| Host und kind-Node | `nvidia-smi` erkennt RTX 3060 und Treiber 580.178.04 |
+| containerd | 2.3.4, CDI aktiv, Suchpfade `/etc/cdi` und `/var/run/cdi` |
+| Aktueller Kubernetes-Stand | Eine GPU, Node `Ready`, keine Node-Pressure; alle 23 laufenden Pods bereit, drei Model-Pull-Pods abgeschlossen |
+| Modelle / Datenträger | Alle drei Modelle verfügbar; PVC `Bound`; alle drei Pull-Jobs erfolgreich |
+| Terraform init / fmt / validate | Erfolgreich; Helm 3.3.0 in der AI-Lockdatei ergänzt |
+| CPU-Plan vor Aktivierung | Keine Änderungen |
+| Plugin-Bootstrap-Apply | Genau ein Helm-Release angelegt; Plugin nach Pfadkorrektur bereit |
+| Vollständige GPU-Vorschau | Genau ein Helm-Release neu und Ollama aktualisiert; keine Löschungen |
+| Ollama-GPU-Apply | Nur das bestehende Deployment aktualisiert; keine weiteren Änderungen oder Löschungen |
+| Abschließender AI-Plan | Exitcode 0, keine Änderungen; lokale GPU-Einstellung automatisch geladen |
+| Cluster-Plan | Keine Änderungen, kein Neuaufbau |
+| Plattform-Konfiguration `apps/` | Validierung erfolgreich; vollständiger Plan mangels separater Cloudflare-Umgebungsvariablen hier nicht ausführbar |
+| Helm-Rendering / Node-Bootstrap | Erfolgreich; neun Treiber-/Hook-Dateien im bestehenden Node bereitgestellt |
+| Bestehende Plattform | Öffentliche Webseite HTTP/2 200 mit gültigem TLS; Grafana HTTP 200 und Datenbank `ok`; 12/12 Prometheus-Ziele `up` |
+| CUDA-Test-Pod | Unprivilegiert, genau eine GPU; VectorAdd für 50.000 Elemente meldet `Test PASSED`, Exitcode 0; Pod anschließend entfernt |
+| Ollama-GPU-Inferenz | Alle drei Modelle erfolgreich; GPU-Speicherbelegung über `/api/ps` bestätigt |
+| Bestandsschutz | Modell-Digests, PVC-/PV- und Node-Identitäten unverändert; bestehende Plattform-Pods ohne zusätzliche Neustarts |
+
+**Noch offen:** Ein vollständiger Driftcheck von `apps/` ist damit nicht belegt.
+Im separaten Terminal mit den vorhandenen Cloudflare-Umgebungsvariablen
+`terraform -chdir=apps plan -input=false -detailed-exitcode` ausführen:
+Exitcode 0 bedeutet keine Änderungen, 2 bedeutet geplante Änderungen und 1 einen
+Fehler. Kein Apply ausführen; Zugangsdaten und Plan-JSON nicht veröffentlichen.
+Die erfolgreichen Laufzeitprüfungen ersetzen diesen Terraform-Driftcheck nicht.
+
+Erste CPU-Referenz während der Vorbereitung: `qwen2.5:1.5b`, Digest
+`65ec06548149b04c096a120e4a6da9d4017ea809c91734ea5631e89f96ddc57b`,
+Q4_K_M, identisches Ollama-Image, vier CPU-Threads, Kontext 2048, Seed 42,
+Temperatur 0, 128 Ausgabetokens, ein Warm-up und drei Messungen. Prompt:
+`Write a detailed numbered list of twenty practical Kubernetes maintenance tasks. Explain every task in two full sentences.`
+
+| CPU-Lauf | Generierte Tokens/s |
+|---|---:|
+| 1 | 26.20 |
+| 2 | 26.41 |
+| 3 | 26.42 |
+| Median | 26.41 |
+
+Berechnung aus Ollamas API: `eval_count / eval_duration * 1e9`. Modell-Ladezeit
+und Prompt-Auswertung sind darin nicht enthalten. `/api/ps` bestätigte beim
+CPU-Lauf `size_vram = 0`. Die folgende aktuelle Vergleichsmessung wurde während
+der Aktivierung mit einer frischen CPU-Referenz und denselben Bedingungen für
+die GPU durchgeführt. Für den Nachweis wurden zusätzlich `/api/ps`, `ollama ps`,
+die Ollama-Logs und GPU-Speicher/Prozesse über `nvidia-smi` geprüft. Ein sichtbares
+Gerät oder eine schnelle Antwort allein beweist keine GPU-Inferenz. Die API
+wurde dafür ausschließlich lokal weitergeleitet:
+
+```sh
+"$kubectl_lab" --kubeconfig=cluster/kubeconfig -n ai port-forward --address=127.0.0.1 svc/ollama 11434:11434
+```
+
+Im zweiten Terminal `http://127.0.0.1:11434/api/tags`, `/api/ps` und
+`/api/generate` verwenden. Der konkrete Benchmark-Request ist:
+
+```json
+{"model":"qwen2.5:1.5b","prompt":"Write a detailed numbered list of twenty practical Kubernetes maintenance tasks. Explain every task in two full sentences.","stream":false,"keep_alive":"5m","options":{"temperature":0,"seed":42,"num_ctx":2048,"num_predict":128,"num_thread":4}}
+```
+
+Referenz: [Ollama Generate API](https://docs.ollama.com/api/generate).
+`qwen2.5:0.5b` und `smollm2:135m` dürfen beim Test nicht gelöscht oder erneut
+gezogen werden. Modellbestand und Digests vor und nach dem GPU-Wechsel
+vergleichen. Der Host nutzt die GPU auch für die grafische Oberfläche;
+Hintergrundlast kann Benchmarks beeinflussen. Kein Leistungsversprechen aus
+einzelnen Lab-Messungen ableiten.
+
+### CPU-/GPU-Vergleich während der Aktivierung
+
+Beide Reihen verwenden exakt den obigen JSON-Request, dieselbe Ollama-Version
+0.40.19, dasselbe Image, denselben Modell-Digest, vier CPU-Threads, Kontext 2048,
+Seed 42, Temperatur 0 und dieselben Limits von vier CPUs und 4 GiB RAM. Nach je
+einem Warm-up folgen drei Messungen mit jeweils 128 generierten Tokens.
+Begleitend wird in beiden Reihen mit demselben Abtastintervall `nvidia-smi`
+abgefragt. Die zusätzliche GPU-Anforderung ist der einzige Deployment-Unterschied.
+
+| Messlauf | CPU Tokens/s | GPU Tokens/s |
+|---|---:|---:|
+| 1 | 24.25 | 176.40 |
+| 2 | 23.55 | 173.62 |
+| 3 | 24.72 | 174.33 |
+| Median | **24.25** | **174.33** |
+
+Das Verhältnis der ungerundeten Mediane beträgt **7,19×**. Verglichen wird
+ausschließlich die warme Token-Generierung aus `eval_count / eval_duration`,
+nicht die End-to-End-Latenz. Der erste CPU-Warm-up dauerte insgesamt 6,99 s,
+der erste GPU-Warm-up 69,28 s. Beide sind vom Median ausgeschlossen. Die lange
+erste GPU-Anfrage gehört zum beobachteten Lade-/Initialisierungsaufwand und
+darf beim Bewerten interaktiver Nutzung nicht unterschlagen werden.
+
+GPU-Nachweise für `qwen2.5:1.5b`:
+
+- Logs: `offloaded 29/29 layers to GPU`, Modell- und KV-Puffer auf `CUDA0`.
+- `ollama ps`: `100% GPU`, Kontext 2048. Das bezeichnet die Modellplatzierung,
+  nicht die Auslastungsanzeige der GPU.
+- `/api/ps`: `size_vram = 1108565032` Bytes, etwa 1.057 MiB; CPU-Reihe: 0 Bytes.
+- `nvidia-smi`: `/usr/lib/ollama/llama-server` mit 1.186 MiB GPU-Speicher.
+- Zehn Samples während der drei GPU-Messläufe: GPU-Auslastung bis 95 %, Median
+  95 %. Das sind hostweite Werte einschließlich der grafischen Oberfläche;
+  bereits während der CPU-Reihe lag deren Median bei 22 %. Die Zuordnung zur
+  Inferenz stützt sich daher zusätzlich auf Prozess, VRAM und CUDA-Offload.
+
+Zusätzliche kurze Inferenztests bestätigten GPU-VRAM für alle vorhandenen
+Modelle: `qwen2.5:0.5b` 456.382.217 Bytes, `smollm2:135m` 332.545.391 Bytes und
+`qwen2.5:1.5b` 1.108.565.032 Bytes. Die Modell-Digests blieben gegenüber dem
+gesicherten Vorher-Zustand unverändert. Es wurde kein Modell gelöscht oder neu
+gezogen. Ollama bleibt unprivilegiert und ausschließlich als ClusterIP erreichbar.
+
+### Grenzen und nächster Meilenstein
+
+Der Host-Treiber und Toolkit bleiben Voraussetzungen; das Skript pinnt den
+hier geprüften Stand und muss nach einem Treiber-/Toolkit-Update überprüft
+werden. kind ist ein privilegierter Docker-Node: Die Vorbereitung ersetzt keine
+Produktionsinstallation auf dedizierten GPU-Nodes. Die kopierten Dateien bleiben
+im laufenden Node erhalten, müssen nach dessen Neuaufbau erneut bereitgestellt
+werden. Ein vollständiger Neuaufbau mit GPU und Erhalt externer Modelldaten ist
+noch nicht getestet und wird im bestehenden Cluster nicht erzwungen.
+
+Cloudflare, Traefik, Monitoring und MCP-RBAC bleiben unverändert. MCP erhält
+keine zusätzlichen Rechte für `ai`. Die bestehenden Architektur-Grafiken zeigen
+weiterhin die Web-Plattform; die AI-/GPU-Erweiterung ist oben separat beschrieben.
+Die GPU-Zuweisung und GPU-Inferenz sind jetzt nachgewiesen. Als nächster
+Meilenstein folgt ein eigener Kubernetes-Operator in Go zur automatisierten
+Modellverwaltung. Dieser Operator ist hier noch nicht implementiert.
