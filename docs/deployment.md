@@ -653,6 +653,14 @@ umask 077
 kubectl_lab="${XDG_CACHE_HOME:-$HOME/.cache}/kubernetes-ai-iac/kubectl/v1.35.8/kubectl"
 gpu_plan_dir=$(mktemp -d "${TMPDIR:-/tmp}/kubernetes-ai-gpu-plan.XXXXXXXX")
 
+# Neuer Checkout: VOR dem ersten GPU-Plan dauerhaft aktivieren.
+# Nur anlegen, wenn noch keine lokale GPU-Konfiguration vorhanden ist.
+if [ ! -e ai/gpu.auto.tfvars ]; then
+  printf 'enable_gpu = true\n' > ai/gpu.auto.tfvars
+fi
+chmod 600 ai/gpu.auto.tfvars
+# Bei vorhandener Datei sicherstellen, dass enable_gpu = true gesetzt ist.
+
 # Nach Freigabe: Node vorbereiten, dann nur den Plugin-Bootstrap planen.
 python3 ai/prepare-kind-gpu.py --apply
 terraform -chdir=ai plan -input=false -target=helm_release.nvidia_device_plugin -out="$gpu_plan_dir/plugin.tfplan"
@@ -690,7 +698,9 @@ enable_gpu = true
 Terraform lädt sie bei normalen Befehlen mit `-chdir=ai` automatisch. Die Datei
 hat Modus `0600`, ist durch `*.tfvars` von Git ausgeschlossen und enthält keine
 Zugangsdaten. Auf einem neuen Checkout bleibt der Standard CPU; die lokale
-GPU-Einstellung muss dort bewusst angelegt werden. Auch ein Rückwechsel auf CPU
+GPU-Einstellung muss deshalb wie oben gezeigt **vor dem ersten GPU-Terraform-Plan**
+angelegt beziehungsweise auf `true` gesetzt werden. Andernfalls plant Terraform
+den optionalen Plugin-Release nicht. Auch ein Rückwechsel auf CPU
 erfordert einen geprüften Plan und eine Freigabe. Der abschließende vollständige
 AI-Plan hat die lokale Einstellung ohne CLI-Variablen geladen und keine
 Änderungen gemeldet.
@@ -749,6 +759,13 @@ unabhängig davon erfolgreich; die GPU-Spezifikation selbst ist gültig.
 | CUDA-Test-Pod | Unprivilegiert, genau eine GPU; VectorAdd für 50.000 Elemente meldet `Test PASSED`, Exitcode 0; Pod anschließend entfernt |
 | Ollama-GPU-Inferenz | Alle drei Modelle erfolgreich; GPU-Speicherbelegung über `/api/ps` bestätigt |
 | Bestandsschutz | Modell-Digests, PVC-/PV- und Node-Identitäten unverändert; bestehende Plattform-Pods ohne zusätzliche Neustarts |
+
+**Noch offen:** Ein vollständiger Driftcheck von `apps/` ist damit nicht belegt.
+Im separaten Terminal mit den vorhandenen Cloudflare-Umgebungsvariablen
+`terraform -chdir=apps plan -input=false -detailed-exitcode` ausführen:
+Exitcode 0 bedeutet keine Änderungen, 2 bedeutet geplante Änderungen und 1 einen
+Fehler. Kein Apply ausführen; Zugangsdaten und Plan-JSON nicht veröffentlichen.
+Die erfolgreichen Laufzeitprüfungen ersetzen diesen Terraform-Driftcheck nicht.
 
 Erste CPU-Referenz während der Vorbereitung: `qwen2.5:1.5b`, Digest
 `65ec06548149b04c096a120e4a6da9d4017ea809c91734ea5631e89f96ddc57b`,
