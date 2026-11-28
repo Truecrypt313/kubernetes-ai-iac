@@ -23,12 +23,13 @@ A DevOps portfolio project that turns a local Kubernetes cluster into a public H
 
 | Area | Implemented capability |
 |---|---|
-| Infrastructure as code | Two small Terraform configurations: a single-node kind cluster and its applications, with pinned providers and committed lockfiles. |
+| Infrastructure as code | Three Terraform configurations: the kind cluster, platform applications and private Ollama inference, with pinned providers and committed lockfiles. |
 | Application delivery | Two Nginx replicas behind a ClusterIP service and Traefik HTTP/HTTPS ingress. |
 | Public access | Terraform-managed Cloudflare Tunnel and DNS, with no router port forwarding. |
 | Certificate lifecycle | cert-manager with separate Let's Encrypt staging and production issuers, DNS-01 validation and a production TLS certificate. |
 | Observability | Prometheus Operator, Prometheus, Grafana, Node Exporter and kube-state-metrics, accessed privately through local port forwarding. |
 | AI-assisted operations | Codex in VS Code uses a local Kubernetes MCP server to inspect approved resources in `web` and `monitoring`. |
+| Local AI inference | Private Ollama service with persistent models and automated pull jobs; optional NVIDIA GPU support is prepared and awaits runtime validation. |
 
 **Recorded verification — 27 November 2026:** public and local HTTPS returned HTTP/2 200 with valid certificates; both Nginx replicas were ready; Prometheus reported 12/12 scrape targets up. These are documented test results, not uptime or performance guarantees. [Validation records and commands →](docs/deployment.md#cloudflare-tunnel)
 
@@ -41,6 +42,8 @@ A DevOps portfolio project that turns a local Kubernetes cluster into a public H
 Cloudflare terminates browser TLS. Inside the cluster, cloudflared connects to `https://traefik.web.svc.cluster.local:443` and validates the origin certificate against **`lab.motion1.de`** (`no_tls_verify = false`). Traefik forwards HTTP to Nginx. Internal HTTP ingress remains available as a deliberate rollback option; TLS failures do not trigger an automatic downgrade.
 
 cert-manager uses Cloudflare DNS-01 validation with separate staging and production issuers. The monitoring stack has no public Ingress. Kubernetes MCP runs locally over stdio, using a separate ServiceAccount and kubeconfig.
+
+The `ai` namespace adds a private Ollama ClusterIP service and a protected model PVC. It currently runs on CPU. Optional GPU support connects the host NVIDIA driver to kind's containerd through CDI and the official NVIDIA Device Plugin; its activation requires approval. [AI installation, plans and test status →](docs/deployment.md#ollama-und-optionale-nvidia-gpu-integration)
 
 ## AI-assisted infrastructure workflow
 
@@ -110,6 +113,11 @@ Prometheus retains metrics for 24 hours. Prometheus and Grafana use temporary st
 ├── apps/
 │   ├── main.tf                  # Workloads, tunnel, TLS, monitoring and MCP RBAC
 │   └── .terraform.lock.hcl       # Application provider versions and checksums
+├── ai/
+│   ├── main.tf                  # Ollama, persistent models and optional GPU plugin
+│   ├── prepare-kind-gpu.py      # Preview or explicitly prepare the existing kind node
+│   └── .terraform.lock.hcl       # AI provider versions and checksums
+├── labs/ollama/                 # Original CPU manifests and a separate CUDA test pod
 ├── .codex/
 │   ├── config.toml              # Project-local Codex MCP integration
 │   └── kubernetes-mcp.toml      # Read-only tools and Secret access restrictions
@@ -131,5 +139,8 @@ For exact versions, required environment variables, installation ordering, port-
 - [x] Enable Traefik HTTPS and fully validated Cloudflare origin TLS.
 - [x] Deploy private Prometheus and Grafana monitoring.
 - [x] Integrate a local Kubernetes MCP server with read-only RBAC.
+- [x] Provision private Ollama inference and three persistent models with Terraform.
+- [ ] Validate NVIDIA CDI, GPU allocation and Ollama GPU inference (implementation prepared).
+- [ ] Build a Kubernetes operator in Go for model management after GPU integration.
 - [ ] Add GitHub Actions for code validation.
 - [ ] Verify a complete infrastructure teardown and rebuild.

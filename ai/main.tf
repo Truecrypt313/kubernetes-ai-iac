@@ -6,12 +6,29 @@ terraform {
       source  = "hashicorp/kubernetes"
       version = "= 3.5.0"
     }
+    helm = {
+      source  = "hashicorp/helm"
+      version = "= 3.3.0"
+    }
   }
 }
 
 provider "kubernetes" {
   config_path    = abspath("${path.module}/../cluster/kubeconfig")
   config_context = "kind-kubernetes-ai-iac"
+}
+
+provider "helm" {
+  kubernetes = {
+    config_path    = abspath("${path.module}/../cluster/kubeconfig")
+    config_context = "kind-kubernetes-ai-iac"
+  }
+}
+
+variable "enable_gpu" {
+  description = "Install the NVIDIA device plugin and allocate one GPU to Ollama after preparing the kind node."
+  type        = bool
+  default     = false
 }
 
 variable "models" {
@@ -43,6 +60,29 @@ resource "kubernetes_namespace_v1" "ai" {
   metadata {
     name = "ai"
   }
+}
+
+resource "helm_release" "nvidia_device_plugin" {
+  count = var.enable_gpu ? 1 : 0
+
+  name       = "nvidia-device-plugin"
+  namespace  = "kube-system"
+  repository = "https://nvidia.github.io/k8s-device-plugin"
+  chart      = "nvidia-device-plugin"
+  version    = "0.19.2"
+
+  values = [yamlencode({
+    image              = { tag = "v0.19.2@sha256:d4a9fdb14cacd97a6ad15ff549a6d9b52cfc908cb0552f65fa16ef034358677e" }
+    deviceListStrategy = "cdi-cri"
+    failOnInitError    = true
+    nvidiaDriverRoot   = "/"
+    cdi                = { nvidiaHookPath = "/usr/bin/nvidia-cdi-hook" }
+    securityContext    = { privileged = true }
+    nodeSelector       = { "kubernetes.io/hostname" = "kubernetes-ai-iac-control-plane" }
+    affinity           = null
+    gfd                = { enabled = false }
+    nfd                = { enabled = false }
+  })]
 }
 
 resource "kubernetes_persistent_volume_claim_v1" "ollama" {
@@ -105,14 +145,14 @@ resource "kubernetes_deployment_v1" "ollama" {
           }
 
           resources {
-            requests = {
+            requests = merge({
               cpu    = "2"
               memory = "2Gi"
-            }
-            limits = {
+            }, var.enable_gpu ? { "nvidia.com/gpu" = "1" } : {})
+            limits = merge({
               cpu    = var.cpu
               memory = var.memory
-            }
+            }, var.enable_gpu ? { "nvidia.com/gpu" = "1" } : {})
           }
 
           readiness_probe {
@@ -138,6 +178,8 @@ resource "kubernetes_deployment_v1" "ollama" {
       }
     }
   }
+
+  depends_on = [helm_release.nvidia_device_plugin]
 }
 
 resource "kubernetes_service_v1" "ollama" {
